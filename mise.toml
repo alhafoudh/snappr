@@ -1,0 +1,21 @@
+[tools]
+ruby = "3.4.5"
+
+[env]
+SNAPPR_ROOT = "{{config_root}}"
+
+[tasks.setup]
+description = "install gems"
+run = "bundle install"
+
+[tasks.watch]
+description = "watch the drop folder and overlay each photo that lands in it"
+run = "bundle exec bin/snappr watch"
+
+[tasks.overlay]
+description = "overlay the given photos now, then open them"
+run = "bundle exec bin/snappr overlay"
+
+[tasks.test]
+description = "unit tests"
+run = "bundle exec ruby -Ilib -Itest -e 'Dir[\"test/**/*_test.rb\"].each { |f| require File.expand_path(f) }'"

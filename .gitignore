@@ -1,0 +1,13 @@
+# Bundler. Gemfile.lock is deliberately NOT ignored: snappr is an application,
+# not a gem, so the lock belongs in the repo.
+/.bundle/
+/vendor/bundle/
+
+# macOS
+.DS_Store
+
+# snappr's own output and in-progress files. These normally land next to the
+# source photo in ~/Downloads, but `bin/snappr overlay` can be pointed at a file
+# inside the project while iterating on the overlays.
+*.overlay.png
+*.tmp-*
