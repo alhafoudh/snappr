@@ -35,11 +35,27 @@ module Snappr
 
     ORIENTATIONS = %i[landscape portrait].freeze
 
+    # The branding may ship only one orientation. A stretched overlay still
+    # warns and prints, a missing one prints nothing - so fall back to the other
+    # orientation's SVG, and error out only when neither file exists.
     def overlay_svg(orientation)
-      key = orientation.to_s
-      raise Error, "unknown orientation: #{orientation}" unless ORIENTATIONS.include?(orientation.to_sym)
+      wanted = configured_overlay_svg(orientation)
+      return wanted if wanted.file?
 
-      resolve(@data.fetch("overlay_svg").fetch(key))
+      other = (ORIENTATIONS - [orientation.to_sym]).first
+      fallback = configured_overlay_svg(other)
+      raise Error, "no overlay SVG found: neither #{wanted} nor #{fallback} exists" unless fallback.file?
+
+      Snappr.logger.warn "#{wanted} is missing, using the #{other} overlay #{File.basename(fallback)} instead"
+      fallback
+    end
+
+    # The configured path for an orientation, whether or not the file exists.
+    def configured_overlay_svg(orientation)
+      orientation = orientation.to_sym
+      raise Error, "unknown orientation: #{orientation}" unless ORIENTATIONS.include?(orientation)
+
+      resolve(@data.fetch("overlay_svg").fetch(orientation.to_s))
     end
 
     def print_short_mm = Float(@data.dig("print", "short_mm"))

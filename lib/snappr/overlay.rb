@@ -31,17 +31,27 @@ module Snappr
       source = Pathname.new(source).expand_path
       raise Error, "no such file: #{source}" unless source.file?
 
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      name = source.basename
+
       image = load(source)
       orientation = orientation_of(image.width, image.height)
       svg = @config.overlay_svg(orientation)
+      Snappr.logger.info "#{name}: #{image.width}x#{image.height}, #{orientation} - using #{File.basename(svg)}"
       warn_on_aspect_mismatch(svg, orientation)
 
       layout = layout_for(image, svg, orientation)
+      Snappr.logger.info format(
+        "%s: cropping %dx%d at (%d, %d), placing on a %dx%d canvas",
+        name, layout[:photo_width], layout[:photo_height], layout[:crop_left], layout[:crop_top],
+        layout[:canvas_width], layout[:canvas_height]
+      )
       overlay = overlay_for(image, svg, layout[:canvas_width], layout[:canvas_height])
       background = background_for(image)
 
       destination = destination_for(source)
       temp = temp_path_for(source)
+      Snappr.logger.info "#{name}: compositing the overlay and writing #{destination.basename}"
       begin
         ImageProcessing::Vips
           .source(source.to_s)
@@ -62,6 +72,11 @@ module Snappr
         File.unlink(temp) if File.exist?(temp)
       end
 
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+      Snappr.logger.info format(
+        "%s: wrote %s (%s, %.1fs)",
+        name, destination.basename, Snappr.human_size(File.size(destination)), elapsed
+      )
       destination
     end
 
@@ -159,6 +174,7 @@ module Snappr
       profile = image.get("icc-profile-data") if image.get_fields.include?("icc-profile-data")
       return overlay unless profile
 
+      Snappr.logger.debug "converting the overlay into the photo's colour space"
       Tempfile.create(["snappr-profile", ".icc"]) do |file|
         file.binmode
         file.write(profile)

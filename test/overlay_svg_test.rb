@@ -77,10 +77,9 @@ class OverlaySvgTest < Minitest::Test
 
   # --- the real, committed branding: only properties that must hold whatever it depicts ---
 
-  def test_both_committed_overlays_are_drawn_at_the_print_ratio
-    Snappr::Config::ORIENTATIONS.each do |orientation|
-      svg = Snappr.config.overlay_svg(orientation)
-      assert File.exist?(svg), "#{svg} must exist"
+  def test_committed_overlays_are_drawn_at_the_print_ratio
+    refute_empty committed_overlays, "at least one overlay SVG must be committed"
+    committed_overlays.each do |orientation, svg|
       assert_in_delta Snappr.config.print_ratio(orientation), Snappr::OverlaySvg.aspect_ratio(svg), 0.01,
                       "#{File.basename(svg)} must be drawn at the paper's ratio or it gets stretched"
     end
@@ -89,8 +88,7 @@ class OverlaySvgTest < Minitest::Test
   # Catches the stranded-artwork bug against the real branding, without assuming
   # anything about what that branding depicts.
   def test_committed_overlays_have_a_photo_window_and_strip_it
-    Snappr::Config::ORIENTATIONS.each do |orientation|
-      svg = Snappr.config.overlay_svg(orientation)
+    committed_overlays.each do |orientation, svg|
       window = Snappr::OverlaySvg.photo_window(svg)
 
       assert_operator window[:width], :>, 0.1, "#{orientation}: window looks too small to be real"
@@ -108,8 +106,7 @@ class OverlaySvgTest < Minitest::Test
   # If the viewBox were being overwritten, the artwork would shrink away from the
   # edges instead of scaling with the frame.
   def test_committed_overlay_artwork_scales_with_the_frame
-    Snappr::Config::ORIENTATIONS.each do |orientation|
-      svg = Snappr.config.overlay_svg(orientation)
+    committed_overlays.each do |orientation, svg|
       small = opaque_bounds(Snappr::OverlaySvg.render(svg, 740, 500))
       large = opaque_bounds(Snappr::OverlaySvg.render(svg, 2960, 2000))
 
@@ -121,6 +118,15 @@ class OverlaySvgTest < Minitest::Test
   end
 
   private
+
+  # An orientation may legitimately have no SVG - the pipeline then falls back
+  # to the other one - so only the files that exist are held to these properties.
+  def committed_overlays
+    Snappr::Config::ORIENTATIONS.filter_map do |orientation|
+      svg = Snappr.config.configured_overlay_svg(orientation)
+      [orientation, svg] if svg.file?
+    end
+  end
 
   def marker_pixels(image)
     red, green, blue = image.extract_band(0), image.extract_band(1), image.extract_band(2)

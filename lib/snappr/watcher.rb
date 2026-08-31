@@ -20,7 +20,7 @@ module Snappr
       dir = @config.watch_dir
       raise Error, "watch dir does not exist: #{dir}" unless dir.directory?
 
-      Snappr.logger.info "watching #{dir}"
+      Snappr.logger.info "watching #{dir} for #{@config.extensions.join(", ")} files"
       listener = Listen.to(dir.to_s, only: /\.[^.\/]+\z/) do |modified, added, _removed|
         (added + modified).uniq.each { |path| handle(path) }
       end
@@ -56,19 +56,30 @@ module Snappr
     private
 
     def handle(path)
-      return unless candidate?(path)
-      return unless claim(path)
+      name = File.basename(path)
+
+      unless candidate?(path)
+        Snappr.logger.debug "#{name}: ignored, not a file snappr handles"
+        return
+      end
+      unless claim(path)
+        Snappr.logger.debug "#{name}: already being processed, event ignored"
+        return
+      end
 
       begin
+        Snappr.logger.info "#{name}: new photo detected"
+        Snappr.logger.info "#{name}: waiting for the transfer to finish"
         wait_until_stable(path)
+        Snappr.logger.info "#{name}: transfer complete (#{Snappr.human_size(File.size(path))}), processing"
         destination = @overlay.call(path)
-        Snappr.logger.info "#{File.basename(path)} -> #{destination.basename}"
+        Snappr.logger.info "#{name}: done"
         open(destination) if @config.open_after?
       rescue UnstableFileError
-        Snappr.logger.warn "#{File.basename(path)}: never finished writing, skipped"
+        Snappr.logger.warn "#{name}: never finished writing, skipped"
       rescue StandardError => e
         # One bad photo must not take the daemon down.
-        Snappr.logger.error "#{File.basename(path)}: #{e.class}: #{e.message}"
+        Snappr.logger.error "#{name}: #{e.class}: #{e.message}"
       ensure
         release(path)
       end
@@ -103,6 +114,7 @@ module Snappr
     end
 
     def open(destination)
+      Snappr.logger.info "#{destination.basename}: opening"
       system("open", destination.to_s) or Snappr.logger.warn "open failed for #{destination}"
     end
   end

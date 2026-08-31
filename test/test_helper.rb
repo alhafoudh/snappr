@@ -3,6 +3,11 @@
 require "minitest/autorun"
 require "tmpdir"
 require "tempfile"
+
+# Keep the pipeline's progress logging out of the test output; warnings and
+# errors still show. Set SNAPPR_LOG_LEVEL=info to see it while debugging.
+ENV["SNAPPR_LOG_LEVEL"] ||= "warn"
+
 require "snappr"
 
 module Snappr

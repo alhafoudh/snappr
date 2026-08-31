@@ -39,10 +39,13 @@ module Snappr
 
       overlay = Overlay.new
       failed = 0
+      Snappr.logger.info "overlaying #{paths.size} photo#{"s" unless paths.size == 1}"
       paths.each do |path|
         destination = overlay.call(path)
-        Snappr.logger.info "#{File.basename(path)} -> #{destination.basename}"
-        system("open", destination.to_s) if Snappr.config.open_after?
+        if Snappr.config.open_after?
+          Snappr.logger.info "#{destination.basename}: opening"
+          system("open", destination.to_s)
+        end
       rescue StandardError => e
         failed += 1
         Snappr.logger.error "#{path}: #{e.class}: #{e.message}"

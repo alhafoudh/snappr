@@ -33,12 +33,17 @@ module Snappr
       @config ||= Config.load
     end
 
+    # SNAPPR_LOG_LEVEL=debug also shows the events the watcher ignores.
     def logger
-      @logger ||= Logger.new($stdout, level: Logger::INFO).tap do |log|
+      @logger ||= Logger.new($stdout, level: ENV.fetch("SNAPPR_LOG_LEVEL", "info")).tap do |log|
         log.formatter = ->(severity, time, _progname, msg) do
           "#{time.strftime("%H:%M:%S")} #{severity.ljust(5)} #{msg}\n"
         end
       end
+    end
+
+    def human_size(bytes)
+      bytes < 1024 * 1024 ? format("%d KB", bytes / 1024.0) : format("%.1f MB", bytes / (1024.0 * 1024))
     end
   end
 end
