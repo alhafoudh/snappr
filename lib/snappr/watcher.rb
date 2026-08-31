@@ -21,7 +21,21 @@ module Snappr
       raise Error, "watch dir does not exist: #{dir}" unless dir.directory?
 
       Snappr.logger.info "watching #{dir} for #{@config.extensions.join(", ")} files"
-      listener = Listen.to(dir.to_s, only: /\.[^.\/]+\z/) do |modified, added, _removed|
+
+      # `ignore: %r{/}` keeps listen out of the subdirectories, and it is a
+      # performance constraint rather than a matter of taste. listen's macOS
+      # adapter turns every fsevent into a *recursive* rescan of the changed
+      # directory (`_queue_change(:dir, dir, rel_path, recursive: true)`), and the
+      # watched directory is ~/Downloads - a real downloads folder, ~1.9k entries
+      # at the top level but ~19k files once its 89 subdirectories are walked. So
+      # one unrelated file changing cost 0.5-5s of CPU, and since snappr writes
+      # its own 10-25 MB .overlay.png into that same folder, each photo pinned a
+      # core for about a minute afterwards. Measured 0.517s -> 0.094s per event.
+      #
+      # Note this is not the same thing as the `only:` filter or candidate?: both
+      # of those run *after* the scan, so they stop the work but not the walk.
+      # AirDrop only ever lands files at the top level, so nothing is lost.
+      listener = Listen.to(dir.to_s, only: /\.[^.\/]+\z/, ignore: %r{/}) do |modified, added, _removed|
         (added + modified).uniq.each { |path| handle(path) }
       end
       listener.start

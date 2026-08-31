@@ -221,6 +221,31 @@ calling it from `trap("INT")` dies with
 flips a local flag; `Watcher#run` polls it and stops the listener outside the
 trap.
 
+**`listen` must not be allowed to recurse.** `Listen.to` is passed
+`ignore: %r{/}`, and that is load-bearing for CPU, not tidiness. listen's macOS
+adapter turns every fsevent into a *recursive* rescan of the changed directory
+(`adapter/darwin.rb`, `_queue_change(:dir, dir, rel_path, recursive: true)`), and
+the watched directory is `~/Downloads`: about 1.9k entries at the top level, but
+about 19k files once its 89 subdirectories are walked. One unrelated file
+changing therefore cost 0.5-5s of CPU. Since snappr writes its own 10-25 MB
+`.overlay.png` into that same folder, the write storm from each photo pinned a
+core for **63 seconds** after the photo was already done - a kiosk that looks
+idle while eating 100% of a core. Measured per event: 0.517s before, 0.094s
+after; total CPU over a 5-minute window with one 12MP HEIC processed, 64.3s
+before, 12.1s after.
+
+Note what does *not* help, because it reads like it should: neither the `only:`
+regex nor `Watcher#candidate?` prevents any of this. Both run *after* the scan,
+so they stop the compositing but not the directory walk - the self-output guard
+keeps snappr from re-processing its own PNG while the PNG still costs a full
+19k-file rescan. AirDrop only ever lands files at the top level of the drop
+folder, so ignoring the subdirectories loses nothing.
+
+If this ever needs to go further, the next stop is dropping `listen` for a plain
+`Dir.children` scan on a timer: measured 0.0024s per scan of the same folder,
+40x cheaper again, and `wait_until_stable` already covers the partial-write
+problem that fsevents were buying.
+
 ## The overlay SVGs
 
 There are two, picked by the photo's orientation:
