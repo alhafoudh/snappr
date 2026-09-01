@@ -106,7 +106,11 @@ export default function App() {
     };
   }, []);
 
-  const ordered = useMemo(() => [...photos].sort((a, b) => a.added_at - b.added_at), [photos]);
+  // Newest first, so the strip is left-aligned and each photo that arrives lands
+  // at the left-hand end - the operator's eye never has to follow the newest cell
+  // along the strip. `ordered` is the visual order, so the arrow keys, `step` and
+  // the scroll-into-view below all follow from it without a second index.
+  const ordered = useMemo(() => [...photos].sort((a, b) => b.added_at - a.added_at), [photos]);
   const current = ordered.find((p) => p.source === selected) ?? null;
   const ready = current?.status === "done" && !!current.previews;
 
