@@ -46,6 +46,7 @@ module Snappr
       warnings = []
 
       image = load(source)
+      exif = Exif.read(image)
       orientation = orientation_of(image.width, image.height)
       svg = @config.overlay_svg(orientation)
       Snappr.logger.info "#{name}: #{image.width}x#{image.height}, #{orientation} - using #{File.basename(svg)}"
@@ -99,7 +100,12 @@ module Snappr
         depth: image.format == :ushort ? 16 : 8,
         dpi: [image.xres, image.yres],
         icc: image.get_fields.include?("icc-profile-data"),
-        bytes: bytes, elapsed: elapsed, warnings: warnings }
+        bytes: bytes, elapsed: elapsed, warnings: warnings,
+        # Camera, lens and exposure, for the UI to put under the photo. Read off
+        # the header #load already pulled in, so it costs nothing measurable.
+        # Left out entirely when the photo carries none - a screenshot or a scan
+        # should give the caller no key rather than an empty object.
+        **(exif.empty? ? {} : { exif: exif }) }
     end
 
     def destination_for(source)

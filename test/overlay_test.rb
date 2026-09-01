@@ -268,6 +268,29 @@ class OverlayTest < Minitest::Test
     end
   end
 
+  # Display data for the info line under the photo. It rides along on the result
+  # because the header it comes from is already loaded - see Snappr::Exif.
+  def test_reports_the_camera_and_exposure
+    in_tmpdir do |dir|
+      source = write_fixture(dir, "land.jpg", 1200, 900, exif: APPLE_EXIF, Q: 100)
+      exif = @overlay.process(source)[:exif]
+
+      assert_equal "iPhone 17 Pro", exif[:camera]
+      assert_equal "f/1.8", exif[:aperture]
+      assert_equal "2026-03-21T12:40:52+01:00", exif[:taken_at]
+    end
+  end
+
+  # A screenshot or a scan is an ordinary photo here. No key at all rather than an
+  # empty object, so the caller gets nothing to render rather than something empty.
+  def test_omits_the_exif_key_when_the_photo_carries_none
+    in_tmpdir do |dir|
+      result = @overlay.process(write_fixture(dir, "land.jpg", 1200, 900, Q: 100))
+
+      refute result.key?(:exif)
+    end
+  end
+
   def test_leaves_no_temp_file_behind
     in_tmpdir do |dir|
       @overlay.call(write_fixture(dir, "land.jpg", 1200, 900, Q: 100))

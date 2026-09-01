@@ -32,6 +32,37 @@ pub struct Previews {
     pub source: PathBuf,
 }
 
+/// What the camera said about the photo, as `Snappr::Exif` read it off the source.
+///
+/// Display data only: nothing here reaches the crop, the layout or the pixels. The
+/// values arrive already formatted for a person to read ("f/1.8", "1/120s", "6.8mm"),
+/// because the tag-by-tag knowledge of how to spell them belongs next to the tags.
+///
+/// Every field is independently optional, and cameras vary wildly in what they write -
+/// a screenshot or a scan carries none of them, which is why the whole struct is an
+/// `Option` on `Photo` rather than a default-empty one.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Exif {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub camera: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lens: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focal_length: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focal_length_35mm: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aperture: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shutter: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iso: Option<u32>,
+    /// ISO 8601, and naive when the camera recorded no zone - EXIF keeps the offset in
+    /// a separate tag that plenty of cameras never write.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub taken_at: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Photo {
     /// The source path, which is also the identity: one photo on disk, one record.
@@ -54,6 +85,13 @@ pub struct Photo {
     pub depth: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bytes: Option<u64>,
+    /// Absent on every record written before this field existed, and on every photo
+    /// that carries no camera tags. Both are ordinary, so this is `Option` rather than
+    /// a default-empty struct: an index.json from an older build must keep loading, or
+    /// `Index::load` drops the operator's whole session on the first launch after an
+    /// update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exif: Option<Exif>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default)]
@@ -86,6 +124,7 @@ impl Photo {
             output_height: None,
             depth: None,
             bytes: None,
+            exif: None,
             error: None,
             warnings: Vec::new(),
         }
@@ -103,6 +142,13 @@ impl Photo {
         self.output_height = u32_at("output_height");
         self.depth = frame.get("depth").and_then(Value::as_u64).map(|v| v as u8);
         self.bytes = frame.get("bytes").and_then(Value::as_u64);
+        // Ruby omits the key rather than sending an empty object, so this is None for a
+        // photo with no camera tags. Unparseable EXIF is not worth failing the photo
+        // over either - the print is what matters and it is already written.
+        self.exif = frame
+            .get("exif")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok());
         self.error = None;
 
         self.warnings = frame

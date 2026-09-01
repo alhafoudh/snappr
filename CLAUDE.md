@@ -97,6 +97,30 @@ hour.
 `ContextMenu`. This is a macOS-only app and the OS gets placement, keyboard
 handling and dismissal right for nothing.
 
+**The info line under the photo is one truncating `Text`, and every group in it
+drops out when the source has nothing for it.** `Info` in `Actions.tsx` reads
+camera, lens and exposure from `photo.exif`, so a screenshot or a scan gives
+exactly the line snappr showed before any EXIF was read. Two rules there are not
+obvious:
+
+- **The lens is dropped when it only restates the camera.** Apple writes
+  `LensModel` as `"<camera> back camera 6.765mm f/1.78"` - the camera name, then
+  the focal length and aperture the line already prints. The rule lives in
+  `Snappr::Exif`, not in the frontend, so the shell receives values it can print
+  unmodified. It keeps every interchangeable lens, which is where the lens is the
+  interesting fact.
+- **The shutter time is shown only when it is more than `TAKEN_AT_DRIFT` from the
+  arrival time.** `added_at` is when snappr saw the file, not when the shutter
+  fired. For a photo AirDropped straight off the phone those are seconds apart
+  and "added 2 minutes ago" says everything; for one out of the camera roll the
+  arrival time is actively misleading, and only then does the line grow a
+  `taken 21 Mar, 12:40` group.
+
+The line hover is a Radix `Tooltip` carrying the same facts in full, including
+the two deliberately kept off the line - the 35mm equivalent and the exact clock
+times. The `<time>` element inside it carries no `title` of its own: a native
+tooltip underneath a Radix one races it and wins.
+
 **The titlebar drag region is `data-tauri-drag-region="deep"`.** Tauri's
 `drag.js` treats the bare attribute as "only direct clicks on this element", so a
 wrapper element between the header and the pointer silently stops the window
@@ -141,6 +165,7 @@ once.
       v
   Overlay#call
       |  new_from_file(src).autorot          -> width, height
+      |  Exif.read(image)                    -> camera, lens, exposure, taken_at
       |  orientation_of(width, height)       -> :landscape | :portrait
       |  crop_dimensions(w, h, print_ratio)  -> largest inscribed 148:100 or 100:148
       |  OverlaySvg.render(overlay-<orientation>.svg, crop_w, crop_h)
@@ -476,6 +501,25 @@ Re-verify these if libvips is upgraded. They were established empirically.
   edges go blotchy, so that setting was never as linear as it looked.
 - `xres`/`yres` survive the crop and reach the PNG. Verified round-trip at
   11.811 px/mm (300 dpi) from a JPEG source.
+- **The output PNG already carries the source's full EXIF.** libvips passes the
+  `exif-data` blob through `pngsave` untouched, so `IMG_1234.overlay.png` reads
+  back with Make, Model, LensModel, the exposure and the GPS fix. Nothing in the
+  pipeline does this on purpose and nothing needs to be added to keep it -
+  verified against a real output. Worth knowing before anyone goes looking for
+  the code that preserves metadata, and worth knowing that **the print carries
+  the guest's GPS coordinates** if that ever matters.
+- **EXIF tags come out of libvips as one annotated string per tag**, shaped
+  `<raw> (<human>, <Type>, <n> components, <n> bytes)` - e.g. FNumber is
+  `"1244236/699009 (f/1.8, Rational, 1 components, 8 bytes)"`. The human half is
+  the one worth showing. `Snappr::Exif::ANNOTATED` anchors on the tail rather
+  than stripping the last bracket, because ApertureValue's human half is itself
+  parenthesised (`"1.66 EV (f/1.8)"`) and a bracket-counting parse gets it wrong.
+  Values arrive as ASCII-8BIT and are transcoded and scrubbed: left alone, one
+  high byte in a lens name takes down `JSON.generate` in `Server#emit` and fails
+  a photo whose PNG is already written.
+- libvips writes EXIF ASCII fields to the 7-bit spec, transliterating accents
+  away. So a test fixture that goes through `jpegsave` cannot carry high bytes -
+  set them on an in-memory image instead, which is what `exif_test.rb` does.
 - **libvips `heifsave` does not write resolution metadata**, so a HEIC written by
   vips reads back at the 1 px/mm default. That only affects test fixtures - real
   camera HEICs carry their own - which is why the HEIC tests assert dimensions and
@@ -495,6 +539,7 @@ Re-verify these if libvips is upgraded. They were established empirically.
 bin/snappr                CLI entrypoint
 lib/snappr.rb             Zeitwerk setup, the svgload unblock, Snappr.root/.config/.logger
 lib/snappr/config.rb      config/snappr.yml, project-relative path resolution
+lib/snappr/exif.rb        camera, lens and exposure off the source header, for the UI
 lib/snappr/overlay_svg.rb renders an overlay at a pixel size, finds its #FF00FF window
 lib/snappr/overlay.rb     orientation, window fit, colour-managed composite, PNG save
 lib/snappr/watcher.rb     drop folder via the listen gem, candidate? guard, stability check

@@ -27,13 +27,37 @@ module Snappr
     # Display P3, the space iPhones actually shoot in.
     P3_PROFILE = "/System/Library/ColorSync/Profiles/Display P3.icc"
 
+    # A stand-in for what an iPhone writes, in the raw spellings EXIF uses - rationals
+    # as fractions, the date with colons. Passed to write_fixture as `exif:`.
+    APPLE_EXIF = {
+      "exif-ifd0-Make" => "Apple",
+      "exif-ifd0-Model" => "iPhone 17 Pro",
+      "exif-ifd2-LensModel" => "iPhone 17 Pro back camera 6.765mm f/1.78",
+      "exif-ifd2-FNumber" => "89/50",
+      "exif-ifd2-ExposureTime" => "1/120",
+      "exif-ifd2-ISOSpeedRatings" => "400",
+      "exif-ifd2-FocalLength" => "677/100",
+      "exif-ifd2-FocalLengthIn35mmFilm" => "24",
+      "exif-ifd2-DateTimeOriginal" => "2026:03:21 12:40:52",
+      "exif-ifd2-OffsetTimeOriginal" => "+01:00"
+    }.freeze
+
     def write_fixture(dir, name, width, height,
-                      orientation: nil, dpi: nil, marker_at: nil, profile: nil, deep: false, **save)
+                      orientation: nil, dpi: nil, marker_at: nil, profile: nil, deep: false,
+                      exif: nil, **save)
       image = fixture_image(width, height)
       image = image.insert(Vips::Image.black(40, 40).bandjoin([0, 0]), *marker_at) if marker_at
       image = image.cast(:ushort).linear(257, 0).cast(:ushort) if deep
       image = image.copy(xres: dpi, yres: dpi) if dpi
       image = image.mutate { |m| m.set_type!(GObject::GINT_TYPE, "orientation", orientation) } if orientation
+      # Set as plain strings and libvips writes real EXIF, which reads back in its own
+      # annotated form ("89/50 (f/1.8, Rational, 1 components, 8 bytes)"). So a fixture
+      # exercises the format Snappr::Exif actually has to parse, not a mock of it.
+      if exif
+        image = image.mutate do |m|
+          exif.each { |tag, value| m.set_type!(GObject::GSTR_TYPE, tag, value) }
+        end
+      end
       if profile
         blob = File.binread(profile)
         image = image.mutate { |m| m.set_type!(Vips::BLOB_TYPE, "icc-profile-data", blob) }

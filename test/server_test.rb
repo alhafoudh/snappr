@@ -85,6 +85,19 @@ class ServerTest < Minitest::Test
     assert_in_delta 1.48, overlay.width.fdiv(overlay.height), 0.02, "the overlay preview is not the print"
   end
 
+  # The camera's own facts reach the shell as a nested object with string keys, which
+  # is what the Rust side deserialises into its Exif struct. Symbol keys would arrive
+  # as something serde could still read, but scalarize is what guarantees it.
+  def test_result_carries_the_source_exif
+    source = write_fixture(@dir, "IMG_3.jpg", 2400, 1600, exif: APPLE_EXIF, Q: 100)
+    responses, = converse(hello_frame, { id: 2, cmd: "overlay", source: source.to_s })
+    exif = responses[2]["exif"]
+
+    assert_equal "iPhone 17 Pro", exif["camera"]
+    assert_equal "1/120s", exif["shutter"]
+    assert_equal 400, exif["iso"]
+  end
+
   # Pathname and Symbol are not JSON scalars. If they leak through as anything but
   # strings the other side gets a shape it cannot use.
   def test_result_values_are_json_scalars
