@@ -16,7 +16,7 @@ mod watcher;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
+use tauri::{AppHandle, DragDropEvent, Emitter, Manager, State, WebviewWindow, WindowEvent};
 
 use photo::{Index, Photo, Status};
 use runtime::Runtime;
@@ -42,8 +42,12 @@ pub struct AppState {
     index: Mutex<Index>,
     sidecar: Mutex<Option<Arc<Sidecar>>>,
     runtime: Mutex<RuntimeStatus>,
-    /// Dropping the watcher stops it, so it has to be held for the app's lifetime.
+    /// Dropping the watcher stops it, so it has to be held for as long as the
+    /// operator wants the folder watched. `None` is the paused state.
     watcher: Mutex<Option<notify::RecommendedWatcher>>,
+    /// Photos handed to the app before the sidecar was up - a drop on the Dock
+    /// icon can be what launches the app. Drained by the boot thread.
+    pending: Mutex<Vec<PathBuf>>,
 }
 
 /// Stores the status and announces it, in that order, so a listener that arrives
@@ -109,6 +113,40 @@ fn process(app: AppHandle, source: PathBuf) {
     publish(&app, &photo);
 }
 
+/// The entry point for photos that arrive by hand - dropped on the window or on
+/// the Dock icon - rather than through the watcher. Same candidate filter, same
+/// `process`, so a drop behaves exactly like an AirDrop that landed in the folder.
+/// Only the stability wait is skipped: a dropped file is already complete.
+///
+/// A drop on the Dock icon can also be what launches the app, in which case the
+/// sidecar is still starting. Those are parked in `pending` and released by the
+/// boot thread the moment the sidecar is up, rather than failed on the spot.
+fn ingest(app: &AppHandle, path: PathBuf) {
+    let state = app.state::<AppState>();
+
+    let candidate = {
+        let settings = state.settings.lock().unwrap();
+        watcher::is_candidate(&path, &settings)
+    };
+    if !candidate {
+        log::info!("{} ignored, not a file snappr handles", path.display());
+        return;
+    }
+
+    // Hold `pending` while looking at `sidecar`: the boot thread takes the same
+    // lock before it installs the sidecar and drains the queue, so a path can
+    // never fall between "not ready yet" here and the drain there.
+    let mut pending = state.pending.lock().unwrap();
+    if state.sidecar.lock().unwrap().is_some() {
+        drop(pending);
+        let handle = app.clone();
+        std::thread::spawn(move || process(handle, path));
+    } else {
+        log::info!("{} queued until the pipeline is ready", path.display());
+        pending.push(path);
+    }
+}
+
 fn start_watching(app: &AppHandle, settings: &Settings) -> Result<(), String> {
     let handle = app.clone();
     let watcher = watcher::spawn(settings.watch_dir.clone(), settings.clone(), move |path| {
@@ -150,7 +188,37 @@ fn set_watch_dir(app: AppHandle, state: State<AppState>, dir: PathBuf) -> Result
         settings.clone()
     };
 
-    start_watching(&app, &updated)?;
+    if updated.watch_enabled {
+        start_watching(&app, &updated)?;
+    }
+    Ok(updated)
+}
+
+/// Pauses or resumes the folder watch. Dropping the watcher is what stops it. The
+/// choice is persisted, so a kiosk comes back the way it was left; the toggle in
+/// the bar always shows which.
+#[tauri::command]
+fn set_watching(app: AppHandle, state: State<AppState>, enabled: bool) -> Result<Settings, String> {
+    let updated = {
+        let mut settings = state.settings.lock().unwrap();
+        settings.watch_enabled = enabled;
+        settings.save(&app)?;
+        settings.clone()
+    };
+
+    if enabled {
+        if let Err(error) = start_watching(&app, &updated) {
+            // Do not claim to be watching when we are not: put the setting back
+            // and let the UI re-read it.
+            let mut settings = state.settings.lock().unwrap();
+            settings.watch_enabled = false;
+            settings.save(&app)?;
+            return Err(error);
+        }
+    } else {
+        state.watcher.lock().unwrap().take();
+        log::info!("watching paused");
+    }
     Ok(updated)
 }
 
@@ -244,17 +312,29 @@ pub fn run() {
             sidecar: Mutex::new(None),
             runtime: Mutex::new(RuntimeStatus::default()),
             watcher: Mutex::new(None),
+            pending: Mutex::new(Vec::new()),
         })
         .invoke_handler(tauri::generate_handler![
             list_photos,
             get_settings,
             set_watch_dir,
+            set_watching,
             reprocess,
             runtime_status,
             share_photo,
             print_photo,
             reveal_photo,
         ])
+        // Files dropped on the window. Tauri owns drag-and-drop (dragDropEnabled is
+        // on, the default), so the webview never sees the drop and cannot navigate
+        // to the file - which is what it did while the flag was off.
+        .on_window_event(|window, event| {
+            if let WindowEvent::DragDrop(DragDropEvent::Drop { paths, .. }) = event {
+                for path in paths {
+                    ingest(window.app_handle(), path.clone());
+                }
+            }
+        })
         .setup(|app| {
             let handle = app.handle().clone();
             let state = app.state::<AppState>();
@@ -278,17 +358,30 @@ pub fn run() {
 
                 match started {
                     Ok(sidecar) => {
-                        boot.state::<AppState>()
-                            .sidecar
-                            .lock()
-                            .unwrap()
-                            .replace(Arc::new(sidecar));
+                        // Install the sidecar and take whatever was dropped on us
+                        // before it was ready, under the same lock `ingest` holds
+                        // while it decides between "process now" and "queue".
+                        let queued = {
+                            let state = boot.state::<AppState>();
+                            let mut pending = state.pending.lock().unwrap();
+                            state.sidecar.lock().unwrap().replace(Arc::new(sidecar));
+                            std::mem::take(&mut *pending)
+                        };
+                        for path in queued {
+                            let handle = boot.clone();
+                            std::thread::spawn(move || process(handle, path));
+                        }
 
                         // The pipeline is usable either way here: a watch that
-                        // failed to start still leaves `mise run overlay` and the
-                        // retry button working, so this is reported rather than
-                        // treated as the app being broken.
-                        let error = start_watching(&boot, &settings).err().inspect(|e| log::error!("{e}"));
+                        // failed to start still leaves drops, `mise run overlay`
+                        // and the retry button working, so this is reported rather
+                        // than treated as the app being broken.
+                        let error = if settings.watch_enabled {
+                            start_watching(&boot, &settings).err().inspect(|e| log::error!("{e}"))
+                        } else {
+                            log::info!("watching is paused, not watching {}", settings.watch_dir.display());
+                            None
+                        };
                         set_runtime_status(&boot, RuntimeStatus { ready: true, error });
                     }
                     Err(error) => {
@@ -305,13 +398,28 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while building snappr")
-        .run(|app, event| {
+        .run(|app, event| match event {
             // Closing stdin is the documented shutdown for `Server#run`, which reads
             // to EOF. Without this the child outlives the app.
-            if let tauri::RunEvent::ExitRequested { .. } = event {
+            tauri::RunEvent::ExitRequested { .. } => {
                 if let Some(sidecar) = app.state::<AppState>().sidecar.lock().unwrap().take() {
                     sidecar.shutdown();
                 }
             }
+            // Files dropped on the Dock icon, or opened with snappr from Finder.
+            // macOS delivers these to the running instance directly, so the
+            // single-instance plugin is not involved. The Dock only accepts the
+            // drop because tauri.conf.json declares the photo extensions under
+            // bundle.fileAssociations - and only in a built .app.
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Opened { urls } => {
+                for url in urls {
+                    match url.to_file_path() {
+                        Ok(path) => ingest(app, path),
+                        Err(()) => log::warn!("asked to open {url}, which is not a file"),
+                    }
+                }
+            }
+            _ => {}
         });
 }

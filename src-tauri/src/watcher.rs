@@ -23,7 +23,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::channel;
+use std::sync::mpsc::{channel, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -100,7 +100,21 @@ where
 
         loop {
             // Drain whatever the watcher has produced without blocking, then poll.
-            while let Ok(event) = rx.try_recv() {
+            // The sender lives inside the watcher's callback, so once the caller
+            // drops the watcher the channel disconnects - that is this thread's
+            // signal to finish what is arriving and exit, rather than sleeping
+            // forever. Every directory change and every toggle of the watch would
+            // otherwise leave one more idle thread behind.
+            let mut disconnected = false;
+            loop {
+                let event = match rx.try_recv() {
+                    Ok(event) => event,
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                };
                 for path in event.paths {
                     if is_candidate(&path, &settings) && !arriving.contains_key(&path) {
                         if let Some(print) = fingerprint(&path) {
@@ -155,6 +169,11 @@ where
                 arriving.remove(&path);
                 log::info!("{} has settled", path.display());
                 on_photo(path);
+            }
+
+            if disconnected && arriving.is_empty() {
+                log::info!("stopped watching {}", dir.display());
+                break;
             }
 
             thread::sleep(POLL);

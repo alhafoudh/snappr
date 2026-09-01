@@ -27,6 +27,7 @@ export interface Photo {
 
 export interface Settings {
   watch_dir: string;
+  watch_enabled: boolean;
   extensions: string[];
   output_suffix: string;
   background: string;

@@ -68,6 +68,9 @@ fn default_stability_timeout_secs() -> u64 {
 #[serde(default)]
 pub struct Settings {
     pub watch_dir: PathBuf,
+    /// The bar's watch toggle. Persisted so a kiosk comes back the way it was
+    /// left; the toggle always shows which, so there is no hidden state.
+    pub watch_enabled: bool,
     pub extensions: Vec<String>,
     /// Dual-purpose: it names the output file *and* is the watcher's self-output
     /// guard, so it has to match what the Ruby side appends.
@@ -95,6 +98,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             watch_dir: default_watch_dir(),
+            watch_enabled: true,
             extensions: default_extensions(),
             output_suffix: default_output_suffix(),
             background: default_background(),

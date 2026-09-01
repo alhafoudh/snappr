@@ -86,5 +86,16 @@ export function usePhotos() {
     setSettings(await invoke<Settings>("set_watch_dir", { dir }));
   }, []);
 
-  return { photos, settings, runtime, selected, setSelected, reprocess, changeWatchDir };
+  const setWatching = useCallback(async (enabled: boolean) => {
+    try {
+      setSettings(await invoke<Settings>("set_watching", { enabled }));
+    } catch (error) {
+      // The shell has already put the setting back to what it could actually
+      // do, so re-read it and let the toggle show that rather than the wish.
+      console.error(error);
+      setSettings(await invoke<Settings>("get_settings"));
+    }
+  }, []);
+
+  return { photos, settings, runtime, selected, setSelected, reprocess, changeWatchDir, setWatching };
 }

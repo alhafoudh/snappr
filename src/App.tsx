@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 
 import { usePhotos } from "./usePhotos";
@@ -45,11 +46,38 @@ function folderName(path: string) {
 }
 
 export default function App() {
-  const { photos, settings, runtime, selected, setSelected, reprocess, changeWatchDir } = usePhotos();
+  const { photos, settings, runtime, selected, setSelected, reprocess, changeWatchDir, setWatching } = usePhotos();
   const [view, setView] = useState<View>("overlay");
   const [busy, setBusy] = useState<"share" | "print" | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  const [dragging, setDragging] = useState(false);
   const shareButton = useRef<HTMLButtonElement>(null);
+
+  // File drops. The shell owns them (dragDropEnabled is on), so the webview never
+  // sees the drop and Rust does the processing; this only paints the target while
+  // something is being dragged over the window. The preventDefault pair is
+  // insurance for the day someone turns dragDropEnabled off again: without it
+  // WKWebView navigates to the dropped file and the app is gone.
+  useEffect(() => {
+    const swallow = (event: DragEvent) => event.preventDefault();
+    window.addEventListener("dragover", swallow);
+    window.addEventListener("drop", swallow);
+
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    getCurrentWebview()
+      .onDragDropEvent((event) => {
+        setDragging(event.payload.type === "enter" || event.payload.type === "over");
+      })
+      .then((off) => (cancelled ? off() : (unlisten = off)));
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+      window.removeEventListener("dragover", swallow);
+      window.removeEventListener("drop", swallow);
+    };
+  }, []);
 
   const ordered = useMemo(() => [...photos].sort((a, b) => a.added_at - b.added_at), [photos]);
   const current = ordered.find((p) => p.source === selected) ?? null;
@@ -126,10 +154,21 @@ export default function App() {
   const preview = current?.previews?.[view];
 
   return (
-    <div className="app">
+    <div className={`app ${dragging ? "is-dragging" : ""}`}>
       {/* data-tauri-drag-region is what makes a transparent titlebar's row
           draggable; without it the only grab handle is the sliver above it. */}
       <header className="bar" data-tauri-drag-region>
+        <h1 className="bar__title">Snappr</h1>
+        <button
+          className={`bar__watch ${settings?.watch_enabled ? "is-on" : ""}`}
+          onClick={() => settings && setWatching(!settings.watch_enabled)}
+          disabled={!settings}
+          aria-pressed={settings?.watch_enabled ?? false}
+          title={settings?.watch_enabled ? "Watching the folder - click to pause" : "Paused - click to watch the folder"}
+        >
+          <span className="bar__dot" aria-hidden="true" />
+          {settings?.watch_enabled ? "Watching" : "Paused"}
+        </button>
         <button
           className="bar__dir"
           onClick={pickWatchDir}
@@ -163,7 +202,13 @@ export default function App() {
               );
             }
             if (!current) {
-              return <p className="notice">AirDrop a photo to {settings ? folderName(settings.watch_dir) : "the watched folder"} to get started.</p>;
+              return settings?.watch_enabled === false ? (
+                <p className="notice">Watching is paused. Drop a photo here to overlay it.</p>
+              ) : (
+                <p className="notice">
+                  AirDrop a photo to {settings ? folderName(settings.watch_dir) : "the watched folder"}, or drop one here, to get started.
+                </p>
+              );
             }
             if (preview) {
               return <img className="stage__image" src={convertFileSrc(preview)} alt={current.name} draggable={false} />;
