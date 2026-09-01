@@ -79,18 +79,25 @@ fn process(app: AppHandle, source: PathBuf) {
     let state = app.state::<AppState>();
 
     // Already known and finished? Then this is a duplicate event, not a new photo.
-    if state
-        .index
-        .lock()
-        .unwrap()
-        .get(&source)
-        .is_some_and(|p| matches!(p.status, Status::Processing | Status::Done))
-    {
-        log::debug!("{} is already handled, ignoring", source.display());
-        return;
-    }
+    // Known but queued or failed? Then this is a retry of the same photo, and it
+    // keeps its arrival time so it neither moves along the strip nor restarts its
+    // "added N minutes ago" label.
+    let known_added_at = {
+        let index = state.index.lock().unwrap();
+        match index.get(&source) {
+            Some(p) if matches!(p.status, Status::Processing | Status::Done) => {
+                log::debug!("{} is already handled, ignoring", source.display());
+                return;
+            }
+            Some(p) => Some(p.added_at),
+            None => None,
+        }
+    };
 
     let mut photo = Photo::queued(source.clone());
+    if let Some(added_at) = known_added_at {
+        photo.added_at = added_at;
+    }
     photo.status = Status::Processing;
     publish(&app, &photo);
 
@@ -235,6 +242,70 @@ fn reprocess(app: AppHandle, state: State<AppState>, source: PathBuf) -> Result<
     Ok(())
 }
 
+/// Finishes a clear: deletes the preview JPEGs the dropped records owned and tells
+/// the webview which cells have gone.
+///
+/// Called with no locks held. Deleting a dozen files is quick but it is still I/O,
+/// and `publish` takes the index lock from the processing threads.
+///
+/// **Nothing in the watched folder is touched.** The original and the overlay PNG
+/// beside it both stay where they are, so a cleared photo can be brought straight
+/// back by dropping it on the window again - which is also what makes clearing safe
+/// enough to leave unconfirmed for a single cell.
+fn discard(app: &AppHandle, gone: Vec<Photo>) -> usize {
+    for path in gone.iter().flat_map(Photo::owned_previews) {
+        match std::fs::remove_file(&path) {
+            Ok(()) => log::debug!("deleted {}", path.display()),
+            // Already gone is the outcome we wanted, not a failure worth logging.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => log::warn!("cannot delete {}: {e}", path.display()),
+        }
+    }
+
+    let sources: Vec<&PathBuf> = gone.iter().map(|p| &p.source).collect();
+    log::info!("cleared {} photo(s) from the filmstrip", sources.len());
+    let _ = app.emit("cleared", &sources);
+    sources.len()
+}
+
+/// Clears one cell from the filmstrip.
+///
+/// A photo that is not in the index is already clear, so this succeeds rather than
+/// complaining - the operator asked for a state, not for an action.
+#[tauri::command]
+fn clear_photo(app: AppHandle, state: State<AppState>, source: PathBuf) -> Result<(), String> {
+    let gone = {
+        let mut index = state.index.lock().unwrap();
+        match index.remove(&source) {
+            Some(photo) => {
+                index.save(&app)?;
+                photo
+            }
+            None => return Ok(()),
+        }
+    };
+    discard(&app, vec![gone]);
+    Ok(())
+}
+
+/// Clears the whole filmstrip.
+///
+/// A photo that is still being composited goes too, and then comes back when it
+/// finishes: `process` publishes its outcome regardless of what happened to the
+/// index underneath it. That is the honest behaviour - the photo really did arrive
+/// after the operator cleared - and it is why this returns the count rather than
+/// leaving the UI to assume the strip is now empty.
+#[tauri::command]
+fn clear_all_photos(app: AppHandle, state: State<AppState>) -> Result<usize, String> {
+    let gone = {
+        let mut index = state.index.lock().unwrap();
+        let gone = index.drain();
+        index.save(&app)?;
+        gone
+    };
+    Ok(discard(&app, gone))
+}
+
 #[tauri::command]
 fn runtime_status(state: State<AppState>) -> RuntimeStatus {
     state.runtime.lock().unwrap().clone()
@@ -321,6 +392,8 @@ pub fn run() {
             set_watch_dir,
             set_watching,
             reprocess,
+            clear_photo,
+            clear_all_photos,
             runtime_status,
             share_photo,
             print_photo,

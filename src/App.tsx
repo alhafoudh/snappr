@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { Menu, type MenuOptions } from "@tauri-apps/api/menu";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { open } from "@tauri-apps/plugin-dialog";
+import { confirm, open } from "@tauri-apps/plugin-dialog";
 
 import { usePhotos } from "./usePhotos";
+import { useNow } from "./useNow";
+import { relativeTime } from "./relativeTime";
 import type { Photo, View } from "./types";
 import "./app.css";
 
@@ -16,7 +19,17 @@ import "./app.css";
  * status is a dot in the corner. An earlier version put both on the border, and a
  * selected photo that had a warning simply showed no selection.
  */
-function Cell({ photo, active, onSelect }: { photo: Photo; active: boolean; onSelect: () => void }) {
+function Cell({
+  photo,
+  active,
+  onSelect,
+  onMenu,
+}: {
+  photo: Photo;
+  active: boolean;
+  onSelect: () => void;
+  onMenu: (event: React.MouseEvent) => void;
+}) {
   const status = photo.status === "failed" ? "failed" : photo.warnings.length > 0 ? "warned" : null;
   const tooltip = photo.error || photo.warnings[0] || photo.name;
 
@@ -24,6 +37,7 @@ function Cell({ photo, active, onSelect }: { photo: Photo; active: boolean; onSe
     <button
       className={`cell ${active ? "is-selected" : ""}`}
       onClick={onSelect}
+      onContextMenu={onMenu}
       title={tooltip}
       aria-pressed={active}
       data-source={photo.source}
@@ -46,12 +60,25 @@ function folderName(path: string) {
 }
 
 export default function App() {
-  const { photos, settings, runtime, selected, setSelected, reprocess, changeWatchDir, setWatching } = usePhotos();
+  const {
+    photos,
+    settings,
+    runtime,
+    selected,
+    setSelected,
+    reprocess,
+    clearPhoto,
+    clearAllPhotos,
+    changeWatchDir,
+    setWatching,
+  } = usePhotos();
   const [view, setView] = useState<View>("overlay");
   const [busy, setBusy] = useState<"share" | "print" | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const shareButton = useRef<HTMLButtonElement>(null);
+  const contextMenu = useRef<Menu | null>(null);
+  const now = useNow();
 
   // File drops. The shell owns them (dragDropEnabled is on), so the webview never
   // sees the drop and Rust does the processing; this only paints the target while
@@ -146,6 +173,87 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [step, act]);
 
+  // A native menu rather than an HTML one: this is a macOS app, and the OS gets
+  // placement, keyboard handling and dismissal right for nothing.
+  //
+  // The menu is closed on the *next* right-click, not as soon as popup() resolves.
+  // Each item's action arrives over a channel belonging to the menu's resource on
+  // the Rust side, so freeing it the instant the menu is dismissed races the click
+  // that dismissed it. Holding one alive bounds the cost to a single resource.
+  const popup = useCallback(async (items: MenuOptions["items"]) => {
+    const menu = await Menu.new({ items });
+    void contextMenu.current?.close();
+    contextMenu.current = menu;
+    // No position argument: Tauri pops the menu at the pointer, which is where a
+    // context menu belongs and is one fewer coordinate space to get wrong.
+    await menu.popup();
+  }, []);
+
+  useEffect(() => () => void contextMenu.current?.close(), []);
+
+  const clearOne = useCallback(
+    async (photo: Photo) => {
+      setProblem(null);
+      try {
+        await clearPhoto(photo.source);
+      } catch (error) {
+        setProblem(String(error));
+      }
+    },
+    [clearPhoto],
+  );
+
+  // Clearing one cell asks nothing: it is undone by dropping the photo back on the
+  // window. Clearing the strip at an event throws away the whole session's worth of
+  // cells at once, so that one asks first. Neither deletes anything on disk, and
+  // the wording says so - the point of clearing is a filmstrip the operator can see
+  // the current queue in, not housekeeping.
+  const clearEverything = useCallback(async () => {
+    const count = ordered.length;
+    if (count === 0) return;
+    const ok = await confirm(
+      `Clear ${count} photo${count === 1 ? "" : "s"} from the filmstrip? The photos and any prints already made stay on disk.`,
+      { title: "Clear the filmstrip", kind: "warning", okLabel: "Clear All", cancelLabel: "Cancel" },
+    );
+    if (!ok) return;
+
+    setProblem(null);
+    try {
+      await clearAllPhotos();
+    } catch (error) {
+      setProblem(String(error));
+    }
+  }, [ordered.length, clearAllPhotos]);
+
+  const clearAllItem = () => ({
+    id: "clear-all",
+    text: "Clear All",
+    enabled: ordered.length > 0,
+    action: () => void clearEverything(),
+  });
+
+  // Right-clicking a cell selects it first, the way Finder does, so the menu can
+  // never turn out to have acted on a photo other than the one under the pointer.
+  const cellMenu = (photo: Photo) => (event: React.MouseEvent) => {
+    event.preventDefault();
+    // Without this the strip's handler fires on the way up and pops a second menu.
+    event.stopPropagation();
+    setSelected(photo.source);
+    void popup([
+      { id: "clear", text: "Clear", action: () => void clearOne(photo) },
+      { item: "Separator" },
+      clearAllItem(),
+    ]);
+  };
+
+  // "Clear All" is on the cell's menu as well as the strip's because a full strip
+  // leaves almost nothing to right-click: the cells cover their own background, so
+  // a strip-only menu would be unreachable exactly when it is most wanted.
+  const stripMenu = (event: React.MouseEvent) => {
+    event.preventDefault();
+    void popup([clearAllItem()]);
+  };
+
   const pickWatchDir = async () => {
     const chosen = await open({ directory: true, multiple: false, defaultPath: settings?.watch_dir });
     if (typeof chosen === "string") await changeWatchDir(chosen);
@@ -234,13 +342,22 @@ export default function App() {
               <span className="actions__meta">
                 {current.output_width} x {current.output_height} px, {current.depth}-bit
                 {current.bytes ? `, ${(current.bytes / 1024 / 1024).toFixed(1)} MB` : ""}
+                {", added "}
+                <time dateTime={new Date(current.added_at * 1000).toISOString()} title={new Date(current.added_at * 1000).toLocaleTimeString()}>
+                  {relativeTime(current.added_at, now)}
+                </time>
               </span>
             )}
           </div>
           <div className="actions__buttons">
-            {current?.status === "failed" && (
-              <button className="button" onClick={() => reprocess(current.source)}>Try again</button>
-            )}
+            <button
+              className="button"
+              onClick={() => current && reprocess(current.source)}
+              disabled={!current || current.status === "processing" || current.status === "queued" || busy !== null}
+              title="Run the overlay again for this photo"
+            >
+              {current?.status === "failed" ? "Try again" : "Reprocess"}
+            </button>
             <button className="button" onClick={() => current && invoke("reveal_photo", { source: current.source }).catch((e) => setProblem(String(e)))} disabled={!ready} title="Show the PNG in Finder">
               Reveal
             </button>
@@ -254,9 +371,15 @@ export default function App() {
         </footer>
       </main>
 
-      <nav className="strip" aria-label="Photos">
+      <nav className="strip" aria-label="Photos" onContextMenu={stripMenu}>
         {ordered.map((photo) => (
-          <Cell key={photo.source} photo={photo} active={photo.source === selected} onSelect={() => setSelected(photo.source)} />
+          <Cell
+            key={photo.source}
+            photo={photo}
+            active={photo.source === selected}
+            onSelect={() => setSelected(photo.source)}
+            onMenu={cellMenu(photo)}
+          />
         ))}
       </nav>
     </div>

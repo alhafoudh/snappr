@@ -51,6 +51,16 @@ export function usePhotos() {
           if (event.payload.status === "processing") setSelected(event.payload.source);
         }),
       );
+      // Clearing is a removal, so it cannot travel on the `photo` event: there is
+      // no record left to send. Rust names the sources it dropped and the strip
+      // forgets them, which keeps the rule that the shell is the only thing that
+      // decides what the filmstrip contains.
+      keep(
+        await listen<string[]>("cleared", (event) => {
+          const gone = new Set(event.payload);
+          setPhotos((current) => current.filter((photo) => !gone.has(photo.source)));
+        }),
+      );
       keep(await listen<RuntimeStatus>("runtime", (event) => setRuntime(event.payload)));
 
       // Then pull. The sidecar becomes ready about a second after launch, which is
@@ -76,6 +86,25 @@ export function usePhotos() {
     };
   }, [merge]);
 
+  // Selection is reconciled against the list rather than fixed up wherever a photo
+  // is removed, so clearing one cell, clearing all of them and a record vanishing
+  // for any other reason all land in the same place. The rule is the one used on
+  // launch: the newest of what is left, and nothing at all once the strip is empty.
+  useEffect(() => {
+    if (selected === null || photos.some((photo) => photo.source === selected)) return;
+    setSelected(photos.length > 0 ? photos[photos.length - 1].source : null);
+  }, [photos, selected]);
+
+  // Both clears report failure by throwing - the caller shows it - because unlike
+  // processing there is no photo record left to carry an error back on.
+  const clearPhoto = useCallback(async (source: string) => {
+    await invoke("clear_photo", { source });
+  }, []);
+
+  const clearAllPhotos = useCallback(async () => {
+    await invoke<number>("clear_all_photos");
+  }, []);
+
   const reprocess = useCallback((source: string) => {
     invoke("reprocess", { source }).catch(() => {
       /* the failure comes back as a photo event, so there is nothing to do here */
@@ -97,5 +126,16 @@ export function usePhotos() {
     }
   }, []);
 
-  return { photos, settings, runtime, selected, setSelected, reprocess, changeWatchDir, setWatching };
+  return {
+    photos,
+    settings,
+    runtime,
+    selected,
+    setSelected,
+    reprocess,
+    clearPhoto,
+    clearAllPhotos,
+    changeWatchDir,
+    setWatching,
+  };
 }

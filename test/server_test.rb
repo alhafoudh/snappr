@@ -65,6 +65,26 @@ class ServerTest < Minitest::Test
     end
   end
 
+  # The filmstrip thumbnail is made from the original frame, not from the composite.
+  # At 132x84 the branding panel is a fifth of the cell and identical on every one
+  # of them, so a strip of composites is a strip of the same logo and the operator
+  # cannot tell the cells apart; the whole uncropped frame can be.
+  #
+  # The source is 2:1 because that is nothing like the print's 1.48:1 - the aspect
+  # ratio is what tells a thumbnail of the original from one of the composite, and
+  # the 3:2 used elsewhere in this file is too close to 1.48 to distinguish.
+  def test_the_thumbnail_comes_from_the_original_not_the_composite
+    source = write_fixture(@dir, "IMG_3.jpg", 2400, 1200)
+    responses, = converse(hello_frame, { id: 2, cmd: "overlay", source: source.to_s })
+    previews = responses[2]["previews"]
+
+    thumb = load_image(previews["thumb"])
+    overlay = load_image(previews["overlay"])
+
+    assert_in_delta 2.0, thumb.width.fdiv(thumb.height), 0.02, "the thumb is not the source frame"
+    assert_in_delta 1.48, overlay.width.fdiv(overlay.height), 0.02, "the overlay preview is not the print"
+  end
+
   # Pathname and Symbol are not JSON scalars. If they leak through as anything but
   # strings the other side gets a shape it cannot use.
   def test_result_values_are_json_scalars

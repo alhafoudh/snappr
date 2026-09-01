@@ -9,6 +9,12 @@ module Snappr
   # preview of the composite, and a large preview of the untouched source frame
   # for the overlayed/original toggle.
   #
+  # **The thumbnail is made from the original photo, not from the composite.** At
+  # 132x84 the branding panel is a fifth of the cell and identical on every one of
+  # them, so a strip of composites is a strip of near-identical logos - the whole
+  # frame is what tells the operator which photo a cell is. The composite is what
+  # the stage shows, and the toggle is there for comparing them.
+  #
   # These exist because the webview cannot be shown the real output. Tauri's asset
   # protocol reads the whole file into memory for every request, and the overlay
   # PNGs are 10-25 MB and 16-bit when the source was HEIC - a filmstrip of those
@@ -54,7 +60,7 @@ module Snappr
       FileUtils.mkdir_p(@dir)
 
       { key: key,
-        thumb: write(destination, key, :thumb, @config.preview_thumb_px),
+        thumb: write(source, key, :thumb, @config.preview_thumb_px),
         overlay: write(destination, key, :overlay, @config.preview_max_px),
         source: write(source, key, :source, @config.preview_max_px) }
     end

@@ -129,6 +129,21 @@ impl Photo {
         self.error = Some(error);
     }
 
+    /// The files this record owns outright, and which therefore go when it does.
+    ///
+    /// That is the three preview JPEGs and nothing else. They live in the app's own
+    /// data directory and exist only to be drawn in the window, so they are snappr's
+    /// to delete. The source photo and the overlay PNG beside it are not: they sit
+    /// in the operator's folder, and CLAUDE.md's "snappr never moves or deletes
+    /// anything" covers both. Clearing a photo is about the filmstrip, not about
+    /// the print.
+    pub fn owned_previews(&self) -> Vec<PathBuf> {
+        self.previews
+            .iter()
+            .flat_map(|p| [p.thumb.clone(), p.overlay.clone(), p.source.clone()])
+            .collect()
+    }
+
     /// A finished record is only usable if what it points at still exists. Previews
     /// alone are enough for the UI; the overlay PNG is what print and share need.
     fn intact(&self) -> bool {
@@ -205,6 +220,19 @@ impl Index {
             Some(existing) => *existing = photo,
             None => self.photos.push(photo),
         }
+    }
+
+    /// Drops one record and hands it back, so the caller can clean up the files it
+    /// owned. `None` means it was already gone, which is not an error: two clears of
+    /// the same cell should not fail the second one.
+    pub fn remove(&mut self, source: &Path) -> Option<Photo> {
+        let at = self.photos.iter().position(|p| p.source == source)?;
+        Some(self.photos.remove(at))
+    }
+
+    /// Empties the index, handing back everything that was in it.
+    pub fn drain(&mut self) -> Vec<Photo> {
+        std::mem::take(&mut self.photos)
     }
 
     pub fn get(&self, source: &Path) -> Option<&Photo> {
