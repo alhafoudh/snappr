@@ -163,6 +163,35 @@ impl Photo {
 #[derive(Debug, Default)]
 pub struct Index {
     photos: Vec<Photo>,
+    /// The source path of the cell the operator was last on, so a relaunch reopens
+    /// it. Part of the index rather than of `Settings` because it is only meaningful
+    /// against these records, and is dropped with them.
+    selected: Option<PathBuf>,
+}
+
+/// What actually goes into `index.json`.
+///
+/// The file used to be a bare array of photos, and there are indexes on disk in that
+/// shape, so the untagged `Legacy` arm keeps them loading. Everything written from
+/// here on is the object.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum Stored {
+    Current {
+        photos: Vec<Photo>,
+        #[serde(default)]
+        selected: Option<PathBuf>,
+    },
+    Legacy(Vec<Photo>),
+}
+
+impl From<Stored> for (Vec<Photo>, Option<PathBuf>) {
+    fn from(stored: Stored) -> Self {
+        match stored {
+            Stored::Current { photos, selected } => (photos, selected),
+            Stored::Legacy(photos) => (photos, None),
+        }
+    }
 }
 
 impl Index {
@@ -190,9 +219,10 @@ impl Index {
         let Ok(path) = Self::path(app) else {
             return Self::default();
         };
-        let photos: Vec<Photo> = std::fs::read_to_string(&path)
+        let (photos, selected): (Vec<Photo>, Option<PathBuf>) = std::fs::read_to_string(&path)
             .ok()
-            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .and_then(|raw| serde_json::from_str::<Stored>(&raw).ok())
+            .map(Into::into)
             .unwrap_or_default();
 
         let total = photos.len();
@@ -200,17 +230,39 @@ impl Index {
         if total != photos.len() {
             log::info!("dropped {} index entries whose files are gone", total - photos.len());
         }
-        Self { photos }
+
+        // A selection that did not survive the intactness filter is no selection.
+        let selected = selected.filter(|source| photos.iter().any(|p| &p.source == source));
+        Self { photos, selected }
     }
 
     pub fn save(&self, app: &AppHandle) -> Result<(), String> {
         let path = Self::path(app)?;
-        let raw = serde_json::to_string_pretty(&self.photos).map_err(|e| e.to_string())?;
+        let stored = Stored::Current {
+            photos: self.photos.clone(),
+            selected: self.selected.clone(),
+        };
+        let raw = serde_json::to_string_pretty(&stored).map_err(|e| e.to_string())?;
         std::fs::write(&path, raw).map_err(|e| format!("cannot write {}: {e}", path.display()))
     }
 
     pub fn all(&self) -> &[Photo] {
         &self.photos
+    }
+
+    pub fn selected(&self) -> Option<&PathBuf> {
+        self.selected.as_ref()
+    }
+
+    /// Records the selection, reporting whether it actually changed so the caller
+    /// can skip a write. The frontend re-sends the value it was just given on
+    /// launch, and that should not cost a rewrite of the index.
+    pub fn select(&mut self, source: PathBuf) -> bool {
+        if self.selected.as_ref() == Some(&source) {
+            return false;
+        }
+        self.selected = Some(source);
+        true
     }
 
     /// Inserts or replaces by source path, so re-processing a photo updates its
@@ -227,11 +279,15 @@ impl Index {
     /// the same cell should not fail the second one.
     pub fn remove(&mut self, source: &Path) -> Option<Photo> {
         let at = self.photos.iter().position(|p| p.source == source)?;
+        if self.selected.as_deref() == Some(source) {
+            self.selected = None;
+        }
         Some(self.photos.remove(at))
     }
 
     /// Empties the index, handing back everything that was in it.
     pub fn drain(&mut self) -> Vec<Photo> {
+        self.selected = None;
         std::mem::take(&mut self.photos)
     }
 

@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use tauri::{AppHandle, DragDropEvent, Emitter, Manager, State, WebviewWindow, WindowEvent};
+use tauri_plugin_window_state::StateFlags;
 
 use photo::{Index, Photo, Status};
 use runtime::Runtime;
@@ -174,6 +175,25 @@ fn start_watching(app: &AppHandle, settings: &Settings) -> Result<(), String> {
 #[tauri::command]
 fn list_photos(state: State<AppState>) -> Vec<Photo> {
     state.index.lock().unwrap().all().to_vec()
+}
+
+/// The photo the operator was last looking at, so a relaunch reopens it rather
+/// than jumping to the newest. `None` means there was no selection to restore, and
+/// the frontend falls back to the newest photo.
+#[tauri::command]
+fn selected_photo(state: State<AppState>) -> Option<PathBuf> {
+    state.index.lock().unwrap().selected().cloned()
+}
+
+/// Remembers the selection. Called on every change, which is fine: selection moves
+/// at human speed, and `publish` already saves the whole index per photo event.
+#[tauri::command]
+fn set_selected(app: AppHandle, state: State<AppState>, source: PathBuf) -> Result<(), String> {
+    let mut index = state.index.lock().unwrap();
+    if index.select(source) {
+        index.save(&app)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -372,6 +392,14 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
+        // Size and position only. A kiosk that was quit while minimised, maximised,
+        // fullscreen or hidden should still come back as a plain visible window at
+        // the frame the operator set up.
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(StateFlags::SIZE | StateFlags::POSITION)
+                .build(),
+        )
         .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_log::Builder::new()
@@ -388,6 +416,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_photos,
+            selected_photo,
+            set_selected,
             get_settings,
             set_watch_dir,
             set_watching,

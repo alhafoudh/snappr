@@ -8,8 +8,8 @@ import type { Photo, RuntimeStatus, Settings } from "./types";
  * The whole of the app's state.
  *
  * Rust is the single source of truth and pushes every change as a `photo` event,
- * so nothing here polls and the list cannot drift from the index on disk. The one
- * read is the initial `list_photos`, which repopulates the filmstrip from the
+ * so nothing here polls and the list cannot drift from the index on disk. The reads
+ * are the initial ones, which repopulate the filmstrip and the selection from the
  * persisted index on launch.
  */
 export function usePhotos() {
@@ -66,18 +66,24 @@ export function usePhotos() {
       // Then pull. The sidecar becomes ready about a second after launch, which is
       // usually before this component has mounted at all, and Tauri does not replay
       // events - so without this read the UI would sit on "starting..." forever.
-      const [loaded, current, status] = await Promise.all([
+      const [loaded, current, status, remembered] = await Promise.all([
         invoke<Photo[]>("list_photos"),
         invoke<Settings>("get_settings"),
         invoke<RuntimeStatus>("runtime_status"),
+        invoke<string | null>("selected_photo"),
       ]);
       if (cancelled) return;
 
       setPhotos(loaded);
       setSettings(current);
       setRuntime(status);
-      // Land on the newest, which is what an operator wants after a restart.
-      if (loaded.length > 0) setSelected(loaded[loaded.length - 1].source);
+      // Reopen the cell the operator was last on. A remembered source that is no
+      // longer in the list falls back to the newest, which is what the app did
+      // before it remembered anything.
+      if (loaded.length > 0) {
+        const found = remembered && loaded.some((photo) => photo.source === remembered);
+        setSelected(found ? remembered : loaded[loaded.length - 1].source);
+      }
     })();
 
     return () => {
@@ -94,6 +100,18 @@ export function usePhotos() {
     if (selected === null || photos.some((photo) => photo.source === selected)) return;
     setSelected(photos.length > 0 ? photos[photos.length - 1].source : null);
   }, [photos, selected]);
+
+  // Persist the selection from here rather than from a wrapped setSelected, so the
+  // auto-follow of an arriving photo and the keyboard both go through one path.
+  // Re-sending the value that was just restored is free: Rust only writes when it
+  // actually changes.
+  useEffect(() => {
+    if (selected === null) return;
+    invoke("set_selected", { source: selected }).catch((error) => {
+      // Losing the selection across a restart is not worth interrupting a print for.
+      console.error(error);
+    });
+  }, [selected]);
 
   // Both clears report failure by throwing - the caller shows it - because unlike
   // processing there is no photo record left to carry an error back on.

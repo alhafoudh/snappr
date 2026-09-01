@@ -22,6 +22,7 @@ tauri = { version = "2", features = ["wry", "protocol-asset"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-log = "2"
 tauri-plugin-single-instance = "2"
+tauri-plugin-window-state = "2"
 
 notify = "8"
 serde = { version = "1", features = ["derive"] }
