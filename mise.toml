@@ -19,3 +19,40 @@ run = "bundle exec bin/snappr overlay"
 [tasks.test]
 description = "unit tests"
 run = "bundle exec ruby -Ilib -Itest -e 'Dir[\"test/**/*_test.rb\"].each { |f| require File.expand_path(f) }'"
+
+# The bundled runtime that ships inside snappr.app. Everything below writes only
+# into build/, which is gitignored - these scripts are the source of truth, not
+# their output. Run `mise run runtime` for the lot; the individual tasks are for
+# iterating on one stage.
+#
+# Order matters: build-vips walks the dependency closure of the libvips that
+# build-libvips produces, so it cannot run first.
+[tasks.runtime]
+description = "build the bundled Ruby and libvips, then prove they are self-contained"
+run = [
+  "bin/build-runtime",
+  "bin/build-libvips",
+  "bin/build-vips",
+  "bin/build-gems",
+  "bin/verify-bundle",
+]
+
+[tasks.runtime-ruby]
+description = "build just the relocatable Ruby interpreter"
+run = "bin/build-runtime"
+
+[tasks.runtime-libvips]
+description = "build just libvips from source, with its format support linked in"
+run = "bin/build-libvips"
+
+[tasks.runtime-vips]
+description = "collect and relocate just the libvips dependency closure"
+run = "bin/build-vips"
+
+[tasks.runtime-gems]
+description = "vendor the gems the bundled runtime loads"
+run = "bin/build-gems"
+
+[tasks.runtime-verify]
+description = "run the pipeline inside the bundled runtime and check nothing came from Homebrew"
+run = "bin/verify-bundle"

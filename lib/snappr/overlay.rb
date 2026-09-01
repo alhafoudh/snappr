@@ -26,19 +26,30 @@ module Snappr
       @config = config
     end
 
-    # Returns the path written.
-    def call(source)
+    # Returns the path written. See #process when you want the details too.
+    def call(source) = process(source).fetch(:destination)
+
+    # Composites one photo and returns everything known about the operation.
+    #
+    # #call used to be the whole of this and returned a bare Pathname, which meant
+    # the dimensions, orientation, chosen overlay, layout, bit depth and timings
+    # were computed and then thrown into a log line. The daemon needs them as data
+    # to hand to the UI, so they are collected and returned here instead. #call
+    # stays as a delegate because a dozen tests and both CLI commands pass its
+    # return value straight to Pathname methods.
+    def process(source)
       source = Pathname.new(source).expand_path
       raise Error, "no such file: #{source}" unless source.file?
 
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       name = source.basename
+      warnings = []
 
       image = load(source)
       orientation = orientation_of(image.width, image.height)
       svg = @config.overlay_svg(orientation)
       Snappr.logger.info "#{name}: #{image.width}x#{image.height}, #{orientation} - using #{File.basename(svg)}"
-      warn_on_aspect_mismatch(svg, orientation)
+      warn_on_aspect_mismatch(svg, orientation, warnings)
 
       layout = layout_for(image, svg, orientation)
       Snappr.logger.info format(
@@ -46,7 +57,7 @@ module Snappr
         name, layout[:photo_width], layout[:photo_height], layout[:crop_left], layout[:crop_top],
         layout[:canvas_width], layout[:canvas_height]
       )
-      overlay = overlay_for(image, svg, layout[:canvas_width], layout[:canvas_height])
+      overlay = overlay_for(image, svg, layout[:canvas_width], layout[:canvas_height], warnings)
       background = background_for(image)
 
       destination = destination_for(source)
@@ -73,11 +84,22 @@ module Snappr
       end
 
       elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+      bytes = File.size(destination)
       Snappr.logger.info format(
         "%s: wrote %s (%s, %.1fs)",
-        name, destination.basename, Snappr.human_size(File.size(destination)), elapsed
+        name, destination.basename, Snappr.human_size(bytes), elapsed
       )
-      destination
+
+      { source: source, destination: destination,
+        source_width: image.width, source_height: image.height,
+        orientation: orientation, svg: svg, layout: layout,
+        output_width: layout[:canvas_width], output_height: layout[:canvas_height],
+        # Follows the source and is never cast, so it is worth reporting: an
+        # 8-bit JPEG stays 8-bit and a 10-bit HEIC comes out as a 16-bit PNG.
+        depth: image.format == :ushort ? 16 : 8,
+        dpi: [image.xres, image.yres],
+        icc: image.get_fields.include?("icc-profile-data"),
+        bytes: bytes, elapsed: elapsed, warnings: warnings }
     end
 
     def destination_for(source)
@@ -169,8 +191,8 @@ module Snappr
     # colours have to be converted into it, or they are reinterpreted and come out
     # wrong. White and black are identical in both, so this is a no-op for
     # achromatic branding and insurance for anything with colour in it.
-    def overlay_for(image, svg, width, height)
-      overlay = OverlaySvg.render(svg, width, height)
+    def overlay_for(image, svg, width, height, warnings = nil)
+      overlay = OverlaySvg.render(svg, width, height, warnings: warnings)
       profile = image.get("icc-profile-data") if image.get_fields.include?("icc-profile-data")
       return overlay unless profile
 
@@ -182,25 +204,29 @@ module Snappr
         overlay.icc_transform(file.path, input_profile: "srgb")
       end
     rescue Vips::Error => e
-      Snappr.logger.warn "colour profile unusable, compositing the overlay as sRGB: #{e.message.lines.first.strip}"
+      message = "colour profile unusable, compositing the overlay as sRGB: #{e.message.lines.first.strip}"
+      Snappr.logger.warn message
+      warnings&.push({ kind: "profile_unusable", message: message })
       overlay
     end
 
     # The overlay is stretched to fill the frame, so one drawn at the wrong shape
     # is silently distorted. Say so rather than letting it look like a rendering
     # bug: an overlay for this pipeline should be drawn at the paper's ratio.
-    def warn_on_aspect_mismatch(svg, orientation)
+    def warn_on_aspect_mismatch(svg, orientation, warnings = nil)
       drawn = OverlaySvg.aspect_ratio(svg)
       wanted = @config.print_ratio(orientation)
       return if drawn.nil? || (drawn - wanted).abs <= wanted * 0.01
 
-      Snappr.logger.warn format(
+      message = format(
         "%s is drawn at %.3f:1 but %s prints at %.3f:1 - it will be stretched. " \
         "Redraw it at %d x %d (or any size with that ratio).",
         File.basename(svg), drawn, orientation, wanted,
         *(orientation == :landscape ? [@config.print_long_mm * 20, @config.print_short_mm * 20]
                                     : [@config.print_short_mm * 20, @config.print_long_mm * 20])
       )
+      Snappr.logger.warn message
+      warnings&.push({ kind: "aspect_mismatch", message: message })
     end
   end
 end

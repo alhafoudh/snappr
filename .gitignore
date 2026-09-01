@@ -6,8 +6,20 @@
 # macOS
 .DS_Store
 
+# The bundled Ruby runtime and the libvips closure, built by bin/build-runtime.
+# Large, machine-specific and fully reproducible from the script, so it is never
+# committed. See "Build and bundling" in CLAUDE.md.
+/build/
+
 # snappr's own output and in-progress files. These normally land next to the
 # source photo in ~/Downloads, but `bin/snappr overlay` can be pointed at a file
 # inside the project while iterating on the overlays.
 *.overlay.png
 *.tmp-*
+
+# Tauri / frontend build output.
+/node_modules/
+/dist/
+/src-tauri/target/
+/src-tauri/gen/
+/src-tauri/binaries/

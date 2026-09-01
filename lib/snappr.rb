@@ -29,13 +29,23 @@ module Snappr
       @root ||= Pathname.new(ENV["SNAPPR_ROOT"] || File.expand_path("..", __dir__)).expand_path
     end
 
+    # Normally config/snappr.yml. `snappr serve` replaces it with the config that
+    # arrived over the protocol, so this needs a writer - the memoization below
+    # has no other way back out.
+    attr_writer :config
+
     def config
       @config ||= Config.load
     end
 
+    # Logs go to stderr, not stdout. That is not tidiness: under `snappr serve`
+    # stdout is the NDJSON protocol channel, and a single log line written there
+    # corrupts the stream. This is the only place log output is opened, so keeping
+    # it on stderr here is the whole guarantee.
+    #
     # SNAPPR_LOG_LEVEL=debug also shows the events the watcher ignores.
     def logger
-      @logger ||= Logger.new($stdout, level: ENV.fetch("SNAPPR_LOG_LEVEL", "info")).tap do |log|
+      @logger ||= Logger.new($stderr, level: ENV.fetch("SNAPPR_LOG_LEVEL", "info")).tap do |log|
         log.formatter = ->(severity, time, _progname, msg) do
           "#{time.strftime("%H:%M:%S")} #{severity.ljust(5)} #{msg}\n"
         end

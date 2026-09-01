@@ -26,10 +26,14 @@ module Snappr
     class << self
       # Returns an RGBA Vips::Image of exactly width x height, with the photo
       # window left transparent.
-      def render(svg_path, width, height)
+      #
+      # Pass an array as `warnings` to collect anything worth showing an operator
+      # as well as logging it. An out parameter rather than a changed return type,
+      # so the callers that only want the image are untouched.
+      def render(svg_path, width, height, warnings: nil)
         image = load_svg(stripped_source(svg_path, width, height))
         image = image.has_alpha? ? image : image.add_alpha
-        key_out_marker(image, svg_path)
+        key_out_marker(image, svg_path, warnings)
       end
 
       # Where the photo goes, as fractions of the frame: { x:, y:, width:, height: }
@@ -113,12 +117,14 @@ module Snappr
       # Safety net for a marker whose colour arrives through something the
       # element walk cannot see - a CSS class, a gradient, a <use>. Better a
       # transparent hole than a magenta block on the print.
-      def key_out_marker(image, svg_path)
+      def key_out_marker(image, svg_path, warnings = nil)
         mask = marker_mask(image)
         return image if mask.avg.zero?
 
-        Snappr.logger.warn "#{File.basename(svg_path)}: a #FF00FF marker survived removal, " \
-                           "keying it out - give it a plain fill attribute"
+        message = "#{File.basename(svg_path)}: a #FF00FF marker survived removal, " \
+                  "keying it out - give it a plain fill attribute"
+        Snappr.logger.warn message
+        warnings&.push({ kind: "marker_survived", message: message })
         alpha = image.extract_band(3).boolean(mask.relational_const(:more, 128).ifthenelse(0, 255), :and)
         image.extract_band(0, n: 3).bandjoin(alpha)
       end

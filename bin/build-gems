@@ -1,0 +1,144 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Vendors the gems the bundled runtime loads, into build/gems.
+#
+#   bin/build-gems            install, then verify
+#   bin/build-gems --force    wipe build/gems and start over
+#
+# `bundle install --standalone` is what makes this work: it generates a
+# bundler/setup.rb that only manipulates $LOAD_PATH, using __dir__-relative paths,
+# so the bundled app needs neither bundler nor rubygems at runtime and the tree can
+# be copied into the .app unchanged. That is why the sidecar can be launched with
+# `ruby --disable-gems`, which is also faster to boot.
+#
+# It runs under mise's Ruby, NOT the bundled one, because the bundled interpreter is
+# built without openssl and so cannot fetch over HTTPS. That is safe here and it was
+# checked rather than assumed: the only gem with a compiled artefact is ffi, and its
+# precompiled arm64-darwin binary links nothing but libSystem, leaving its _rb_*
+# symbols to resolve against the host process at load time. So it needs no
+# libruby.dylib and works against the static-libruby interpreter of the same 3.4 ABI.
+#
+# Two things are deliberately left out of the tree:
+#
+#   - the :watch group (listen, rb-fsevent). Rust watches the drop folder inside the
+#     app, and rb-fsevent ships a compiled fsevent_watch helper that would otherwise
+#     be one more Mach-O file to place in Frameworks and sign.
+#   - ffi's ABI directories for every Ruby but ours. The precompiled gem carries
+#     lib/3.0 through lib/4.0, six copies of ffi_c.bundle; Ruby 3.4 loads lib/3.3 and
+#     the rest are dead weight and dead signing surface.
+#
+# BUNDLE_APP_CONFIG is redirected so this never writes .bundle/config in the project
+# and quietly repoints the developer's own `bundle exec` at build/gems.
+
+require "fileutils"
+require "open3"
+require "pathname"
+
+class BuildGems
+  WITHOUT = %w[watch test].freeze
+
+  # The ABI directory ffi's precompiled gem is loaded from. Derived, never
+  # hardcoded: ffi ships lib/3.0 through lib/4.0 and picks by RUBY_VERSION, so
+  # pinning the wrong one prunes the only copy that matters and the runtime dies
+  # with `cannot load such file -- 3.4/ffi_c`. mise's Ruby and the bundled one are
+  # the same 3.4.5, which is what makes reading it from here correct.
+  FFI_ABI = RUBY_VERSION[/\A\d+\.\d+/]
+
+  def initialize(root)
+    @root = root
+    @dest = root.join("build/gems")
+  end
+
+  def call(argv)
+    FileUtils.rm_rf(@dest) if argv.include?("--force")
+
+    if setup_rb.exist?
+      log "already vendored (--force to reinstall)"
+      return verify
+    end
+
+    install
+    prune_ffi
+    verify
+  end
+
+  private
+
+  def setup_rb = @dest.join("bundler/setup.rb")
+
+  def install
+    log "vendoring gems into #{rel(@dest)} (without: #{WITHOUT.join(", ")})"
+    env = {
+      "BUNDLE_PATH" => @dest.to_s,
+      "BUNDLE_WITHOUT" => WITHOUT.join(":"),
+      # Keep bundler's own config out of the project, so this cannot repoint the
+      # developer's `bundle exec` at the vendored tree.
+      "BUNDLE_APP_CONFIG" => @dest.join(".bundle-config").to_s
+    }
+    _out, err, status = Open3.capture3(env, "bundle", "install", "--standalone", chdir: @root.to_s)
+    abort "bundle install failed:\n#{err}" unless status.success?
+  end
+
+  def prune_ffi
+    removed = @dest.glob("ruby/*/gems/ffi-*/lib/[0-9]*").reject { |d| d.basename.to_s == FFI_ABI }
+    removed.each { |dir| FileUtils.rm_rf(dir) }
+    log "pruned #{removed.size} unused ffi ABI directories, kept #{FFI_ABI}"
+  end
+
+  def verify
+    puts
+    log "=== verification ==="
+    @failures = 0
+
+    check("bundler/setup.rb generated", setup_rb.exist?)
+
+    # If this ever stops being true the tree has become non-relocatable and the
+    # .app will load gems from wherever it was built.
+    absolute = setup_rb.exist? ? setup_rb.read.lines.grep(%r{\$:\.unshift "?/}) : []
+    check("load paths are __dir__-relative", absolute.empty?, absolute.first.to_s.strip)
+
+    %w[ruby-vips image_processing zeitwerk rexml ffi].each do |gem|
+      check("#{gem} vendored", !@dest.glob("ruby/*/gems/#{gem}-*").empty?)
+    end
+
+    %w[listen rb-fsevent minitest].each do |gem|
+      found = @dest.glob("ruby/*/gems/#{gem}-*")
+      check("#{gem} left out", found.empty?, found.map(&:basename).join(", "))
+    end
+
+    machos = @dest.glob("**/*.bundle") + @dest.glob("**/bin/fsevent_watch")
+    check("exactly one native artefact (ffi_c.bundle)", machos.size == 1,
+          "#{machos.size}: #{machos.map(&:basename).uniq.join(", ")}")
+
+    # Guards the pruning above. Keeping the wrong ABI directory leaves a tree that
+    # looks complete and fails at require time inside the bundle.
+    kept = @dest.glob("ruby/*/gems/ffi-*/lib/#{FFI_ABI}/ffi_c.bundle")
+    check("ffi_c.bundle kept for this Ruby's ABI (#{FFI_ABI})", !kept.empty?,
+          "have: #{@dest.glob("ruby/*/gems/ffi-*/lib/[0-9]*").map(&:basename).join(", ")}")
+
+    puts
+    log "#{@dest.glob("ruby/*/gems/*").size} gems, #{human(disk_usage)} in #{rel(@dest)}"
+    if @failures.zero?
+      log "gem tree is relocatable"
+      0
+    else
+      log "#{@failures} check(s) failed"
+      1
+    end
+  end
+
+  def disk_usage = @dest.glob("**/*").sum { |f| f.file? ? f.size : 0 }
+
+  def check(label, ok, detail = nil)
+    @failures += 1 unless ok
+    suffix = detail && !detail.empty? && !ok ? "  (#{detail})" : ""
+    puts "  #{ok ? "ok  " : "FAIL"} #{label}#{suffix}"
+  end
+
+  def human(bytes) = format("%.1f MB", bytes / (1024.0 * 1024))
+  def rel(path) = Pathname.new(path).relative_path_from(@root).to_s
+  def log(message) = puts("build-gems: #{message}")
+end
+
+exit(BuildGems.new(Pathname.new(__dir__).parent.expand_path).call(ARGV) || 0)

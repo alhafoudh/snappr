@@ -5,6 +5,7 @@ module Snappr
     USAGE = <<~TEXT
       usage: snappr <command>
 
+        serve              read NDJSON requests on stdin and write results to stdout
         watch              watch the drop folder and overlay each photo that lands in it
         overlay PATH...    overlay the given photos now, then open them
         help               this message
@@ -15,7 +16,10 @@ module Snappr
     def call(argv)
       command, *args = argv
       case command
-      when nil, "watch" then watch
+      # serve, not watch, is the default: inside snappr.app this is spawned as a
+      # sidecar with no arguments, and the app owns the watching.
+      when nil, "serve" then serve
+      when "watch" then watch
       when "overlay" then overlay(args)
       when "help", "-h", "--help" then puts USAGE
       else
@@ -25,6 +29,11 @@ module Snappr
     end
 
     private
+
+    def serve
+      Server.new.run
+      0
+    end
 
     def watch
       Watcher.new.run

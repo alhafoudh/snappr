@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    Required. Ruby `require`s ffi_c.bundle and FFI then dlopens libvips, both from
+    Contents/Frameworks. Under hardened runtime, library validation refuses to load
+    code signed with a different team identifier than the host, which is exactly
+    what those are, so without this the sidecar dies at load time.
+  -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+
+  <!--
+    NOT included, deliberately: com.apple.security.cs.allow-dyld-environment-variables.
+    The bundled libvips is found through LD_LIBRARY_PATH, which FFI reads from
+    Ruby's ENV and joins itself rather than handing to dyld. It is not a DYLD_*
+    variable, so hardened runtime does not strip it and no entitlement is needed.
+    See amendment A2 on the plan note.
+  -->
+</dict>
+</plist>

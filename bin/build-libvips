@@ -1,0 +1,204 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Builds the libvips that ships inside snappr.app, from source, with its format
+# support linked in rather than loaded as runtime modules.
+#
+#   bin/build-libvips            build, skipping if already done
+#   bin/build-libvips --force    wipe and start over
+#
+# WHY NOT JUST USE HOMEBREW'S LIBVIPS
+#
+# Because it cannot be relocated. From 8.16 or so libvips ships its format support
+# as modules it dlopens at runtime from <libdir>/vips-modules-<major>.<minor>/, and
+# libdir is NOT derived from the library's own location: guess_prefix() in
+# libvips/iofuncs/init.c tests the compile-time VIPS_LIBDIR first and returns the
+# compile-time prefix if the module directory exists there.
+#
+# So a copied Homebrew libvips loads its modules back out of
+# /opt/homebrew/Cellar/vips/<version>/lib/vips-modules-8.18/, which drags a second
+# copy of libvips and glib into the process - visible as an objc duplicate-class
+# warning for GNotificationCenterDelegate - after which heifload resolves against
+# the wrong instance and reports itself unavailable. On a machine with no Homebrew
+# there are simply no modules, and no HEIC support at all.
+#
+# -Dmodules=disabled removes the entire problem: heif, rsvg, png and jpeg are
+# linked directly into libvips.42.dylib, so a dependency walk can see everything,
+# Contents/Frameworks stays flat, and there is no VIPSHOME to get right.
+#
+# WHY NOT SHARP'S PREBUILT LIBVIPS
+#
+# @img/sharp-libvips-darwin-arm64 is a single 18 MB dylib with no third-party
+# dependencies at all, and it very nearly works - it loads clean, renders SVG, and
+# reports heifload as present. But it cannot decode HEVC ("Support for this
+# compression format has not been built in"), because sharp excludes HEVC for
+# patent-licensing reasons and supports only AVIF in HEIF containers. iPhone HEICs
+# are HEVC. Note that its header read succeeded, since libvips is lazy - only a
+# real pixel decode of a real HEVC file catches this.
+#
+# WHAT IS TURNED OFF, AND WHY IT IS SAFE
+#
+# Everything snappr cannot reach. magick, poppler, openslide and jpeg-xl are the
+# formats that were shipping as modules; openexr is what dragged in the whole
+# OpenEXR/IlmThread family through @rpath references. pangocairo and fontconfig are
+# only needed for vips' own text rendering, which this pipeline never uses - text in
+# the overlay is drawn by librsvg, which brings its own pango.
+#
+# tiff is deliberately KEPT even though nothing uses it today, because CLAUDE.md
+# names TIFF as the next stop if output size ever becomes a problem, and libtiff is
+# cheap.
+
+require "digest"
+require "etc"
+require "fileutils"
+require "open3"
+require "pathname"
+
+class BuildLibvips
+  VERSION = "8.18.4"
+
+  # From the GitHub release asset digest for v8.18.4.
+  TARBALL_SHA256 = "2677bad6c422617fd1172d359c16af34e736965d042c214203a87187d26ff037"
+
+  # enabled, not auto: a missing dependency must fail the build loudly here rather
+  # than silently produce a libvips that cannot read what gets AirDropped.
+  REQUIRED = %w[heif rsvg jpeg png lcms exif zlib tiff].freeze
+
+  # meson distinguishes "feature" options (enabled/disabled/auto) from plain
+  # booleans (true/false), and libvips uses both. Passing "disabled" to a boolean
+  # fails setup with `Option "nsgif" value disabled is not boolean`, so the two
+  # lists have to stay separate. Types are from libvips' own meson_options.txt.
+  DISABLED_FEATURES = %w[
+    modules heif-module jpeg-xl-module magick-module openslide-module poppler-module
+    magick poppler openslide jpeg-xl openexr openjpeg fftw cfitsio matio nifti
+    pdfium quantizr imagequant webp raw cgif uhdr archive orc
+    pangocairo fontconfig introspection
+  ].freeze
+
+  DISABLED_BOOLEANS = %w[nsgif cplusplus cpp-docs docs examples vapi deprecated].freeze
+
+  def initialize(root)
+    @root = root
+    @cache = root.join("build/cache")
+    @src = root.join("build/src/vips-#{VERSION}")
+    @work = @src.join("_build")
+    @prefix = root.join("build/libvips-prefix")
+  end
+
+  def call(argv)
+    if argv.include?("--force")
+      FileUtils.rm_rf([@prefix, @work])
+    elsif library.exist?
+      log "already built at #{rel(library)} (--force to rebuild)"
+      return report
+    end
+
+    fetch
+    extract
+    setup
+    compile
+    report
+  end
+
+  private
+
+  def library = @prefix.join("lib/libvips.42.dylib")
+
+  def fetch
+    tarball = @cache.join("vips-#{VERSION}.tar.xz")
+    if tarball.exist? && Digest::SHA256.file(tarball).hexdigest == TARBALL_SHA256
+      log "tarball already fetched and verified"
+      return
+    end
+
+    FileUtils.mkdir_p(@cache)
+    url = "https://github.com/libvips/libvips/releases/download/v#{VERSION}/vips-#{VERSION}.tar.xz"
+    log "fetching #{url}"
+    run("curl", "-fL", "--retry", "3", "-o", tarball.to_s, url)
+
+    actual = Digest::SHA256.file(tarball).hexdigest
+    unless actual == TARBALL_SHA256
+      FileUtils.rm_f(tarball)
+      abort "checksum mismatch\n  expected #{TARBALL_SHA256}\n  got      #{actual}"
+    end
+    log "checksum verified"
+  end
+
+  def extract
+    if @src.join("meson.build").exist?
+      log "source already extracted"
+      return
+    end
+
+    FileUtils.mkdir_p(@src.dirname)
+    log "extracting into #{rel(@src)}"
+    run("tar", "xJf", @cache.join("vips-#{VERSION}.tar.xz").to_s, "-C", @src.dirname.to_s)
+  end
+
+  def setup
+    FileUtils.rm_rf(@work)
+    options = REQUIRED.map { |name| "-D#{name}=enabled" } +
+              DISABLED_FEATURES.map { |name| "-D#{name}=disabled" } +
+              DISABLED_BOOLEANS.map { |name| "-D#{name}=false" }
+
+    log "configuring:\n  #{options.join("\n  ")}"
+    run("meson", "setup", @work.to_s,
+        "--prefix=#{@prefix}",
+        "--buildtype=release",
+        "--default-library=shared",
+        # Nothing in the bundle links libvips at build time - ruby-vips dlopens it
+        # by name - so an install rpath would only be a path pointing outside the
+        # .app. build-vips rewrites everything to @loader_path anyway.
+        "-Dcpp_std=c++17",
+        *options,
+        chdir: @src)
+  end
+
+  def compile
+    log "building with ninja"
+    run("ninja", "-C", @work.to_s)
+    log "installing into #{rel(@prefix)}"
+    run("ninja", "-C", @work.to_s, "install")
+  end
+
+  # The point of the exercise: prove the loaders are IN the library rather than in
+  # a module directory beside it.
+  def report
+    abort "no library at #{rel(library)}" unless library.exist?
+
+    puts
+    log "=== #{rel(library)} ==="
+    log format("size: %.1f MB", File.size(library) / (1024.0 * 1024))
+
+    modules = @prefix.glob("lib/vips-modules-*")
+    if modules.empty?
+      log "no module directory - format support is linked in, as intended"
+    else
+      log "WARNING: a module directory exists at #{modules.map { |m| rel(m) }.join(", ")} - " \
+          "modules were meant to be disabled"
+    end
+
+    vendored = dependencies_of(library).grep(%r{\A/opt/homebrew})
+    log "links #{vendored.size} Homebrew dylibs (build-vips relocates these)"
+
+    puts
+    log "next: bin/build-vips, then bin/verify-bundle"
+    0
+  end
+
+  def dependencies_of(path)
+    out, _err, status = Open3.capture3("otool", "-L", path.to_s)
+    return [] unless status.success?
+
+    out.lines.drop(1).filter_map { |line| line.strip.split(" (compatibility").first }
+  end
+
+  def run(*cmd, chdir: @root)
+    abort "command failed: #{cmd.join(" ")}" unless system(*cmd, chdir: chdir.to_s)
+  end
+
+  def rel(path) = Pathname.new(path).relative_path_from(@root).to_s
+  def log(message) = puts("build-libvips: #{message}")
+end
+
+exit(BuildLibvips.new(Pathname.new(__dir__).parent.expand_path).call(ARGV) || 0)

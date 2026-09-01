@@ -1,0 +1,247 @@
+/* Dark and quiet, so the photo is the only bright thing on screen - the same
+   reason Lightroom's develop module looks the way it does. */
+:root {
+  --ground: #141414;
+  --panel: #1d1d1d;
+  --edge: #2e2e2e;
+  --edge-strong: #3d3d3d;
+  --text: #d8d8d8;
+  --muted: #8a8a8a;
+  --accent: #6aa9ff;
+  --warn: #d9a341;
+  --fail: #e2564b;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root { height: 100%; margin: 0; }
+
+body {
+  background: var(--ground);
+  color: var(--text);
+  font: 13px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  overflow: hidden;
+  /* An app, not a page: nothing here is prose to be selected. */
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+button { font: inherit; color: inherit; }
+
+/* Keyboard users get a ring; mouse users do not get one on every click. */
+:focus { outline: none; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.app {
+  display: grid;
+  grid-template-rows: 44px minmax(0, 1fr) 140px;
+  height: 100%;
+}
+
+/* ---- toolbar -------------------------------------------------------------- */
+
+/* The window uses a transparent titlebar, so the bar leaves room for the traffic
+   lights rather than sitting under them. It is also the drag handle (see the
+   data-tauri-drag-region attribute in App.tsx), so its own controls must not be
+   swallowed by the drag: anything interactive gets -webkit-app-region: no-drag. */
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 14px 0 82px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--edge);
+}
+.bar button { -webkit-app-region: no-drag; }
+
+.bar__dir {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: none;
+  border: 0;
+  padding: 4px 9px;
+  border-radius: 5px;
+  max-width: 34ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bar__dir:hover { background: var(--edge); }
+.bar__dir-icon {
+  width: 13px; height: 11px; flex: none;
+  border-radius: 2px 2px 3px 3px;
+  background: linear-gradient(#6f6f6f, #5a5a5a);
+  box-shadow: inset 0 3px 0 -1px #808080;
+}
+.bar__count { color: var(--muted); }
+
+.toggle {
+  display: flex;
+  margin-left: auto;
+  padding: 2px;
+  gap: 2px;
+  background: var(--ground);
+  border: 1px solid var(--edge);
+  border-radius: 7px;
+}
+.toggle button {
+  background: none;
+  border: 0;
+  border-radius: 5px;
+  color: var(--muted);
+  padding: 3px 12px;
+}
+.toggle button:hover:not(:disabled) { color: var(--text); }
+.toggle button.is-on { background: var(--edge-strong); color: var(--text); }
+.toggle button:disabled { opacity: 0.35; }
+
+/* ---- stage ---------------------------------------------------------------- */
+
+/* A column: the canvas takes what is left, the actions row keeps its height. The
+   actions used to float over the image; now the image is never covered. */
+.stage {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.stage__canvas {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px 24px 12px;
+  overflow: hidden;
+}
+
+/* Letterboxed. The overlayed and original views have different aspect ratios by
+   design - the print's 148:100 against the source frame as shot - so the box has
+   to stay put and the image fit inside it, or the layout jumps on every toggle.
+
+   The box must be given a definite size for that to work. With only max-width and
+   max-height the element's box takes the image's own aspect ratio, which leaves
+   object-fit with nothing to do and lets a portrait source stretch the frame.
+   width/height 100% inside a flex parent gives object-fit a box to letterbox
+   into, and it is what stops the stretch. No shadow: a filter on a 2000px image
+   repaints on every toggle, and the dark ground already separates it. */
+.stage__image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  object-fit: contain;
+  object-position: center;
+}
+
+.notice {
+  color: var(--muted);
+  text-align: center;
+  display: grid;
+  gap: 10px;
+  justify-items: center;
+  max-width: 52ch;
+  margin: 0;
+}
+.notice strong { color: var(--text); font-weight: 600; }
+.notice--failed { color: var(--fail); }
+.notice__hint { display: block; font-size: 12px; opacity: 0.7; }
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-height: 52px;
+  padding: 0 24px 12px;
+}
+.actions__info { flex: 1 1 auto; min-width: 0; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.actions__warning { color: var(--warn); }
+.actions__problem { color: var(--fail); }
+.actions__buttons { display: flex; gap: 8px; flex: none; }
+
+.button {
+  background: var(--edge);
+  border: 1px solid var(--edge-strong);
+  border-radius: 6px;
+  padding: 5px 14px;
+  min-width: 76px;
+}
+.button:hover:not(:disabled) { background: var(--edge-strong); }
+.button:active:not(:disabled) { transform: translateY(1px); }
+.button:disabled { opacity: 0.35; }
+.button--primary { background: var(--accent); border-color: var(--accent); color: #0b1a2e; font-weight: 600; }
+.button--primary:hover:not(:disabled) { background: #85b8ff; }
+
+/* ---- filmstrip ------------------------------------------------------------ */
+
+.strip {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  background: var(--panel);
+  border-top: 1px solid var(--edge);
+  scroll-padding: 0 12px;
+}
+
+/* Selection is the border and nothing else - status lives in the badge, so the
+   two never compete. The hover rule is scoped to unselected cells: an earlier
+   version let .cell:hover (two selectors) beat .is-selected (one), and the
+   selected photo went grey the moment the pointer crossed it. */
+.cell {
+  flex: 0 0 auto;
+  width: 132px;
+  min-width: 0;
+  background: none;
+  border: 2px solid transparent;
+  border-radius: 7px;
+  padding: 2px;
+  color: var(--muted);
+  display: grid;
+  gap: 4px;
+  text-align: left;
+}
+.cell:not(.is-selected):hover { border-color: var(--edge-strong); }
+.cell.is-selected { border-color: var(--accent); color: var(--text); }
+
+.cell__frame {
+  position: relative;
+  display: block;
+  height: 84px;
+  border-radius: 3px;
+  background: #101010;
+  overflow: hidden;
+}
+/* contain, not cover: a portrait thumb reads as portrait at a glance, which is
+   the one thing the operator most wants to know before it prints. */
+.cell__frame img { width: 100%; height: 100%; object-fit: contain; display: block; }
+
+.cell__placeholder { display: block; height: 100%; background: #262626; }
+.cell__placeholder.is-working {
+  background: linear-gradient(90deg, #262626, #363636, #262626);
+  background-size: 200% 100%;
+  animation: shimmer 1.2s linear infinite;
+}
+@keyframes shimmer { to { background-position: -200% 0; } }
+
+.cell__badge {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.55);
+}
+.cell__badge--warned { background: var(--warn); }
+.cell__badge--failed { background: var(--fail); }
+
+/* min-width: 0 on the cell above is what lets this truncate: a grid item's default
+   min-width is auto, which refuses to shrink below its content and widened the
+   whole cell to fit the filename instead. */
+.cell__name { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

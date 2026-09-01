@@ -1,0 +1,47 @@
+[package]
+name = "snappr"
+version = "0.1.0"
+description = "AirDrop-to-print kiosk"
+authors = ["Freevision s.r.o."]
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+# The binary is a thin shell over this so the same code can be driven from tests
+# and, later, from the headless subcommands.
+name = "snappr_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# "wry" is needed for with_webview, which is how the macOS share sheet gets an
+# NSView to anchor to. "protocol-asset" serves the preview JPEGs to the webview.
+tauri = { version = "2", features = ["wry", "protocol-asset"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-log = "2"
+tauri-plugin-single-instance = "2"
+
+notify = "8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+
+# The share sheet and the print dialog. Neither has first-party Tauri support
+# (tauri#8063 is still open for share; Webview::print() exists but rasterises the
+# DOM through WKWebView, which is the wrong pipeline for a photo). Both go through
+# AppKit directly, on the main thread. Only on macOS, which is the only platform.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSGeometry", "NSString", "NSURL", "NSObject"] }
+objc2-app-kit = { version = "0.3", features = [
+  "NSImage", "NSImageView", "NSImageCell", "NSControl", "NSView", "NSResponder", "NSWindow",
+  "NSPrintInfo", "NSPrintOperation", "NSPrintPanel", "NSSharingService", "NSGraphics",
+] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

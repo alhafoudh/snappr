@@ -17,7 +17,8 @@ module Snappr
       "png_compression" => 6,
       "background" => "#ffffff",
       "open_after" => true,
-      "stability" => { "interval" => 0.3, "checks" => 2, "timeout" => 30 }
+      "stability" => { "interval" => 0.3, "checks" => 2, "timeout" => 30 },
+      "preview" => { "max_px" => 2000, "thumb_px" => 400, "quality" => 80 }
     }.freeze
 
     def self.load(path = Snappr.root.join("config/snappr.yml"))
@@ -81,6 +82,13 @@ module Snappr
       hex.scan(/../).map { |pair| pair.to_i(16) }
     end
     def open_after?   = !!@data["open_after"]
+
+    # Long edge of the previews the UI displays, in pixels, and their JPEG
+    # quality. These govern display only - the printed PNG is unaffected, so
+    # quality here is a size-against-appearance trade with nothing at stake.
+    def preview_max_px   = Integer(@data.dig("preview", "max_px"))
+    def preview_thumb_px = Integer(@data.dig("preview", "thumb_px"))
+    def preview_quality  = Integer(@data.dig("preview", "quality"))
 
     def stability_interval = Float(@data.dig("stability", "interval"))
     def stability_checks   = Integer(@data.dig("stability", "checks"))
