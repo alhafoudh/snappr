@@ -139,6 +139,7 @@ fn ingest(app: &AppHandle, path: PathBuf) {
     let mut pending = state.pending.lock().unwrap();
     if state.sidecar.lock().unwrap().is_some() {
         drop(pending);
+        log::info!("{} handed to snappr, processing", path.display());
         let handle = app.clone();
         std::thread::spawn(move || process(handle, path));
     } else {
@@ -409,8 +410,11 @@ pub fn run() {
             // Files dropped on the Dock icon, or opened with snappr from Finder.
             // macOS delivers these to the running instance directly, so the
             // single-instance plugin is not involved. The Dock only accepts the
-            // drop because tauri.conf.json declares the photo extensions under
-            // bundle.fileAssociations - and only in a built .app.
+            // drop because src-tauri/Info.plist declares the photo types under
+            // CFBundleDocumentTypes - and only for the bundled .app. Under
+            // `tauri dev` the Dock refuses every drop: Launch Services will not
+            // register a bare executable as an application, so there is nothing
+            // for it to check the file against. Not a bug in this arm.
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Opened { urls } => {
                 for url in urls {

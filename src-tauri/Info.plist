@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	Merged by Tauri into the bundled snappr.app's Info.plist (and into the plist
+	embedded in the development binary). Without CFBundleDocumentTypes macOS has no
+	reason to hand snappr a file: the Dock shows the not-allowed cursor and
+	RunEvent::Opened never fires. Types are declared by UTI, which is what Launch
+	Services matches on; the extensions are the fallback for files with no UTI
+	binding. Viewer + Alternate keeps snappr out of the default-opener slot, but it
+	will appear in Finder's "Open With" list.
+
+	This is kept here rather than in bundle.fileAssociations so the UTIs can be
+	named and there is one place to edit. It does NOT make Dock drops work under
+	`tauri dev`: Launch Services refuses to register a bare executable as an
+	application (lsregister fails with -10811), so the Dock has nothing to check a
+	drop against however complete the embedded plist is. Test Dock drops with
+	`npm run tauri build -- --debug --bundles app` and the .app it produces.
+	-->
+	<key>CFBundleIdentifier</key>
+	<string>sk.freevision.snappr</string>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Photo</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.jpeg</string>
+				<string>public.heic</string>
+				<string>public.heif</string>
+			</array>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>jpg</string>
+				<string>jpeg</string>
+				<string>heic</string>
+				<string>heif</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

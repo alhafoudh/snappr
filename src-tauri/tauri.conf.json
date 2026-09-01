@@ -42,14 +42,6 @@
     "active": true,
     "targets": ["app", "dmg"],
     "icon": ["icons/icon.icns"],
-    "fileAssociations": [
-      {
-        "ext": ["heic", "heif", "jpg", "jpeg"],
-        "name": "Photo",
-        "role": "Viewer",
-        "rank": "Alternate"
-      }
-    ],
     "macOS": {
       "minimumSystemVersion": "11.0",
       "hardenedRuntime": true,
