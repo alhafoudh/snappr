@@ -5,7 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>snappr</title>
   </head>
-  <body>
+  <!--
+    The only global CSS in the app, and it is here rather than in a stylesheet
+    because there is no stylesheet: Radix Themes ships no html/body reset, so
+    without margin:0 the 100vh grid overflows by the browser's default 8px.
+    The rest says "an app, not a page": nothing here is prose to be selected.
+  -->
+  <body style="margin: 0; overflow: hidden; -webkit-user-select: none; user-select: none; cursor: default">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

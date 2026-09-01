@@ -1,63 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { Flex, Grid } from "@radix-ui/themes";
+import { invoke } from "@tauri-apps/api/core";
 import { Menu, type MenuOptions } from "@tauri-apps/api/menu";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { confirm, open } from "@tauri-apps/plugin-dialog";
 
 import { usePhotos } from "./usePhotos";
 import { useNow } from "./useNow";
-import { relativeTime } from "./relativeTime";
+import { Toolbar } from "./components/Toolbar";
+import { Stage } from "./components/Stage";
+import { Actions } from "./components/Actions";
+import { Filmstrip } from "./components/Filmstrip";
 import type { Photo, View } from "./types";
-import "./app.css";
-
-/**
- * The filmstrip cell. Points at the 400px thumb, never the overlay PNG: Tauri's
- * asset protocol reads a whole file into memory per request, and the print output
- * is 10-25 MB and 16-bit when the source was HEIC.
- *
- * Selection and status are separate channels on purpose. Selection is the border;
- * status is a dot in the corner. An earlier version put both on the border, and a
- * selected photo that had a warning simply showed no selection.
- */
-function Cell({
-  photo,
-  active,
-  onSelect,
-  onMenu,
-}: {
-  photo: Photo;
-  active: boolean;
-  onSelect: () => void;
-  onMenu: (event: React.MouseEvent) => void;
-}) {
-  const status = photo.status === "failed" ? "failed" : photo.warnings.length > 0 ? "warned" : null;
-  const tooltip = photo.error || photo.warnings[0] || photo.name;
-
-  return (
-    <button
-      className={`cell ${active ? "is-selected" : ""}`}
-      onClick={onSelect}
-      onContextMenu={onMenu}
-      title={tooltip}
-      aria-pressed={active}
-      data-source={photo.source}
-    >
-      <span className="cell__frame">
-        {photo.previews ? (
-          <img src={convertFileSrc(photo.previews.thumb)} alt="" draggable={false} />
-        ) : (
-          <span className={`cell__placeholder ${photo.status === "processing" ? "is-working" : ""}`} />
-        )}
-        {status && <span className={`cell__badge cell__badge--${status}`} aria-label={status} />}
-      </span>
-      <span className="cell__name">{photo.name}</span>
-    </button>
-  );
-}
-
-function folderName(path: string) {
-  return path.replace(/\/+$/, "").split("/").pop() || path;
-}
 
 export default function App() {
   const {
@@ -158,14 +112,34 @@ export default function App() {
     [current, ready, busy],
   );
 
-  // Lightroom's before/after key is \, so it is the one an operator's hands will
-  // already know. Arrows move along the strip; Cmd+P prints, as everywhere.
+  // ` toggles overlayed against original. Lightroom's before/after key is \, but
+  // ` is the one directly under the operator's left little finger without a
+  // reach, which matters when the gesture is used dozens of times an hour.
+  // Arrows move along the strip, Tab does too, and Cmd+P prints as everywhere.
+  //
+  // The filmstrip is a radiogroup and the view toggle a toggle group, and both own
+  // the arrow keys for their own roving focus while they have it. Without the
+  // guard, one arrow press inside the strip both moves the radiogroup's selection
+  // and steps this handler, and the selection jumps two cells at a time.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      const target = event.target instanceof Element ? event.target : null;
+      const inWidget = target?.closest('[role="radiogroup"], [role="group"], input, textarea');
+
+      if (event.key === "Tab") {
+        // Tab is the filmstrip's next/previous, and the browser's focus
+        // traversal is suppressed outright rather than left to walk the toolbar.
+        // There is no form here to tab through: every control is a single button
+        // the operator reaches with the mouse, and at an event the one thing
+        // worth having under a thumb key is the next photo. Unguarded, because
+        // this has to hold wherever focus happens to be sitting.
+        event.preventDefault();
+        step(event.shiftKey ? -1 : 1);
+      } else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        if (inWidget) return;
         event.preventDefault();
         step(event.key === "ArrowLeft" ? -1 : 1);
-      } else if (event.key === "\\") {
+      } else if (event.key === "`") {
         event.preventDefault();
         setView((v) => (v === "overlay" ? "source" : "overlay"));
       } else if (event.key === "p" && event.metaKey) {
@@ -263,129 +237,53 @@ export default function App() {
     if (typeof chosen === "string") await changeWatchDir(chosen);
   };
 
-  const preview = current?.previews?.[view];
+  const reveal = () => {
+    if (!current) return;
+    invoke("reveal_photo", { source: current.source }).catch((error) => setProblem(String(error)));
+  };
 
   return (
-    <div className={`app ${dragging ? "is-dragging" : ""}`}>
-      {/* data-tauri-drag-region is what makes a transparent titlebar's row
-          draggable; without it the only grab handle is the sliver above it. */}
-      <header className="bar" data-tauri-drag-region>
-        <h1 className="bar__title">Snappr</h1>
-        <button
-          className={`bar__watch ${settings?.watch_enabled ? "is-on" : ""}`}
-          onClick={() => settings && setWatching(!settings.watch_enabled)}
-          disabled={!settings}
-          aria-pressed={settings?.watch_enabled ?? false}
-          title={settings?.watch_enabled ? "Watching the folder - click to pause" : "Paused - click to watch the folder"}
-        >
-          <span className="bar__dot" aria-hidden="true" />
-          {settings?.watch_enabled ? "Watching" : "Paused"}
-        </button>
-        <button
-          className="bar__dir"
-          onClick={pickWatchDir}
-          title={settings ? `Watching ${settings.watch_dir} - click to change` : ""}
-        >
-          <span className="bar__dir-icon" aria-hidden="true" />
-          {settings ? folderName(settings.watch_dir) : "..."}
-        </button>
-        <span className="bar__count">
-          {ordered.length} photo{ordered.length === 1 ? "" : "s"}
-        </span>
-        <div className="toggle" role="group" aria-label="Which version to show">
-          <button className={view === "overlay" ? "is-on" : ""} onClick={() => setView("overlay")} disabled={!ready} aria-pressed={view === "overlay"}>
-            Overlayed
-          </button>
-          <button className={view === "source" ? "is-on" : ""} onClick={() => setView("source")} disabled={!ready} aria-pressed={view === "source"}>
-            Original
-          </button>
-        </div>
-      </header>
+    <Grid rows="44px minmax(0, 1fr) 140px" height="100vh">
+      <Toolbar
+        settings={settings}
+        count={ordered.length}
+        view={view}
+        onView={setView}
+        viewEnabled={ready}
+        onToggleWatching={() => settings && setWatching(!settings.watch_enabled)}
+        onPickWatchDir={pickWatchDir}
+      />
 
-      <main className="stage">
-        <div className="stage__canvas">
-          {(() => {
-            if (!runtime.ready) {
-              return (
-                <p className="notice">
-                  {runtime.error ?? "Starting the image pipeline..."}
-                  {runtime.error && <span className="notice__hint">Run `mise run runtime` and restart the app.</span>}
-                </p>
-              );
-            }
-            if (!current) {
-              return settings?.watch_enabled === false ? (
-                <p className="notice">Watching is paused. Drop a photo here to overlay it.</p>
-              ) : (
-                <p className="notice">
-                  AirDrop a photo to {settings ? folderName(settings.watch_dir) : "the watched folder"}, or drop one here, to get started.
-                </p>
-              );
-            }
-            if (preview) {
-              return <img className="stage__image" src={convertFileSrc(preview)} alt={current.name} draggable={false} />;
-            }
-            if (current.status === "failed") {
-              return (
-                <p className="notice notice--failed">
-                  <strong>{current.name}</strong>
-                  {current.error}
-                  <button className="button" onClick={() => reprocess(current.source)}>Try again</button>
-                </p>
-              );
-            }
-            return <p className="notice">Working on {current.name}...</p>;
-          })()}
-        </div>
+      <Flex direction="column" minHeight="0">
+        <Stage
+          runtime={runtime}
+          settings={settings}
+          current={current}
+          view={view}
+          dragging={dragging}
+          onReprocess={reprocess}
+        />
+        <Actions
+          ref={shareButton}
+          current={current}
+          ready={ready}
+          busy={busy}
+          problem={problem}
+          now={now}
+          onReprocess={reprocess}
+          onReveal={reveal}
+          onShare={() => act("share")}
+          onPrint={() => act("print")}
+        />
+      </Flex>
 
-        <footer className="actions">
-          <div className="actions__info">
-            {current?.warnings[0] && <span className="actions__warning" title={current.warnings.join("\n")}>{current.warnings[0]}</span>}
-            {problem && <span className="actions__problem">{problem}</span>}
-            {ready && !current.warnings.length && !problem && (
-              <span className="actions__meta">
-                {current.output_width} x {current.output_height} px, {current.depth}-bit
-                {current.bytes ? `, ${(current.bytes / 1024 / 1024).toFixed(1)} MB` : ""}
-                {", added "}
-                <time dateTime={new Date(current.added_at * 1000).toISOString()} title={new Date(current.added_at * 1000).toLocaleTimeString()}>
-                  {relativeTime(current.added_at, now)}
-                </time>
-              </span>
-            )}
-          </div>
-          <div className="actions__buttons">
-            <button
-              className="button"
-              onClick={() => current && reprocess(current.source)}
-              disabled={!current || current.status === "processing" || current.status === "queued" || busy !== null}
-              title="Run the overlay again for this photo"
-            >
-              {current?.status === "failed" ? "Try again" : "Reprocess"}
-            </button>
-            <button className="button" onClick={() => current && invoke("reveal_photo", { source: current.source }).catch((e) => setProblem(String(e)))} disabled={!ready} title="Show the PNG in Finder">
-              Reveal
-            </button>
-            <button ref={shareButton} className="button" onClick={() => act("share")} disabled={!ready || busy !== null}>
-              {busy === "share" ? "Preparing..." : "Share"}
-            </button>
-            <button className="button button--primary" onClick={() => act("print")} disabled={!ready || busy !== null} title="Print (Cmd+P)">
-              {busy === "print" ? "Opening..." : "Print"}
-            </button>
-          </div>
-        </footer>
-      </main>
-
-      <nav className="strip" aria-label="Photos" onContextMenu={stripMenu}>
-        {ordered.map((photo) => (
-          <Cell
-            key={photo.source}
-            photo={photo}
-            active={photo.source === selected}
-            onSelect={() => setSelected(photo.source)}
-            onMenu={cellMenu(photo)}
-          />
-        ))}
-      </nav>
-    </div>
+      <Filmstrip
+        photos={ordered}
+        selected={selected}
+        onSelect={setSelected}
+        onCellMenu={cellMenu}
+        onStripMenu={stripMenu}
+      />
+    </Grid>
   );
 }

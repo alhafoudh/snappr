@@ -30,6 +30,87 @@ dropped; `Plans/20260822-snappr-ingest-pipeline.md` and
 No Rails. Runtime gems are `image_processing`, `listen`, `ruby-vips`, `rexml`,
 `zeitwerk` and nothing else.
 
+## The desktop UI
+
+The Tauri app lives at the repo root: `src/` is the React frontend, `src-tauri/`
+the Rust shell. React 18 + Vite + TypeScript, and **Radix Themes 3 carries the
+whole look**.
+
+**There is no stylesheet, by design.** `src/app.css` was deleted in the Radix
+rewrite. Layout, colour, spacing, selection and status all come from Radix
+components, their props and their tokens - a dark-only `<Theme>` in
+`src/main.tsx`. Do not reintroduce an app stylesheet: the point is that there is
+exactly one place the design comes from. Raw CSS survives in three places only,
+each of which Radix genuinely cannot express:
+
+- `index.html` sets `margin: 0` on `<body>`. Radix ships no html/body reset, and
+  without it the `100vh` grid overflows by the browser's default 8px.
+- `objectFit` is inline on the two `<img>` elements, in `Stage.tsx` and
+  `Filmstrip.tsx`. There is no Radix prop for it, and inline style on an `<img>`
+  is what Radix's own examples do. The comment on the letterbox rule is
+  load-bearing: the overlayed and original views have different aspect ratios by
+  design, so the box needs a definite size or a portrait source stretches it.
+- Pixel literals passed *as Radix props* (`height="84px"`,
+  `columns="repeat(n, 132px)"`). Those props are typed `"enum | string"` for
+  exactly this.
+
+Two things that look like they could be simplified and cannot:
+
+- **The filmstrip is `RadioCards`.** The selection ring, hover, focus ring,
+  roving arrow-key focus and radiogroup semantics all come with it, which is most
+  of what the old stylesheet was for. Because it owns the arrow keys while
+  focused, the global keydown handler in `App.tsx` skips events originating
+  inside a `[role="radiogroup"]` or `[role="group"]` - without that guard one
+  arrow press moves the selection twice.
+- **`disabled` goes on `SegmentedControl.Root`, never on its Items.** The Item
+  type removes the prop.
+- **Never wrap a `RadioCards.Item` in a `Tooltip`.** Tooltip's trigger is
+  `asChild` and puts its own `data-state` on whatever it wraps, and RadioGroup's
+  item spreads incoming props *after* setting `data-state`
+  (`react-radio-group/dist/index.mjs:94-98`), so the wrapper's `closed` wins and
+  the checked styling never renders. It fails silently: the selected cell simply
+  looks idle, which reads as "Radix selection is too subtle" rather than as a
+  bug. The Tooltip goes inside the Item.
+
+**The keyboard map**, all of it in one `window` keydown handler in `App.tsx`:
+
+| Key | Does |
+|---|---|
+| `Tab` / `Shift+Tab` | next / previous thumb |
+| `Left` / `Right` | next / previous thumb |
+| `` ` `` | toggle overlayed against original |
+| `Cmd+P` | print |
+
+**Tab does not move focus, anywhere in the app.** The handler calls
+`preventDefault` on it unconditionally, so the browser's focus traversal is
+suppressed outright rather than left to walk the toolbar. This is deliberate:
+there is no form here to tab through, every control is a single button reached
+with the mouse, and at an event the one thing worth having under a thumb key is
+the next photo. Do not "restore accessibility" by deleting it - the filmstrip is
+a radiogroup and is still fully operable from the keyboard.
+
+`` ` `` rather than Lightroom's `\` for the before/after toggle: it is under the
+left little finger without a reach, and the gesture gets used dozens of times an
+hour.
+
+**The context menus are native** (`@tauri-apps/api/menu`), not Radix
+`ContextMenu`. This is a macOS-only app and the OS gets placement, keyboard
+handling and dismissal right for nothing.
+
+**The titlebar drag region is `data-tauri-drag-region="deep"`.** Tauri's
+`drag.js` treats the bare attribute as "only direct clicks on this element", so a
+wrapper element between the header and the pointer silently stops the window
+dragging. The same script already refuses to drag from a clickable element, which
+is why the old `-webkit-app-region: no-drag` rule was never needed and is gone.
+
+Caveat worth knowing: Radix's stylesheet uses `color-mix()` and `:has()`, which
+want Safari 16.2 / 15.4 WebKit, while `minimumSystemVersion` is 11.0. Big Sur can
+run Safari 16.6, so a stock un-updated Big Sur degrades rather than breaks, and
+`panelBackground="solid"` avoids the translucent surfaces that suffer most.
+
+Run it with `npm run tauri dev` (Vite on a fixed port 5183), after
+`mise run runtime` has built the bundled Ruby and libvips into `build/`.
+
 ## Tooling
 
 `mise.toml` pins Ruby and is the entry point operators type. `bin/snappr` is the
