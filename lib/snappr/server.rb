@@ -20,12 +20,15 @@ module Snappr
   #   {"id":2,"cmd":"overlay","source":"/Users/.../IMG_1234.heic"}
   #   {"id":3,"cmd":"configure","config":{...},"preview_dir":"/..."}
   #   {"id":4,"cmd":"ping"}
+  #   {"id":5,"cmd":"overlay_preview","svg":"/...","dir":"/...","key":"a1b2c3d4"}
   #
   # Frames out:
   #   {"id":1,"ok":true,"ruby":"3.4.5","vips":"8.18.4"}
   #   {"id":2,"event":"started","source":"..."}
   #   {"id":2,"ok":true,"destination":"...","previews":{...},...}
   #   {"id":2,"ok":false,"error":{"class":"Vips::Error","code":"photo_unusable","message":"..."}}
+  #   {"id":5,"ok":true,"thumb":"...","width":440,"height":297,"aspect":1.48,
+  #    "window":{"x":0.0,"y":0.0,"width":1.0,"height":1.0},"warnings":[]}
   #
   # **`error.message` is written for the operator; `class` and `code` are for the
   # log.** The shell displays the message verbatim, so nothing technical may go in
@@ -76,6 +79,7 @@ module Snappr
       # without being restarted. A second name only so the logs stay readable.
       when "hello", "configure" then hello(id, request)
       when "overlay" then overlay(id, request)
+      when "overlay_preview" then overlay_preview(id, request)
       when "ping" then emit(id: id, ok: true, pong: true)
       else
         fail_with(id, Problem.new(:unknown_request, cmd: request["cmd"].inspect))
@@ -119,6 +123,27 @@ module Snappr
       previews = @preview.call(source: source, destination: result[:destination])
 
       emit(**result.merge(id: id, ok: true, previews: previews))
+    end
+
+    # The picture of one overlay that the panel draws, and where the photo window
+    # is inside it. Nothing to do with a photo, so it needs no `source` and does
+    # not go near Overlay or Preview.
+    #
+    # It needs no handshake either - OverlayPreview reads the file it is given and
+    # the paper's landscape ratio, and nothing else - but it is still gated on
+    # @overlay, because Snappr.config is what supplies that ratio and only `hello`
+    # sets it.
+    #
+    # `dir` and `key` are the caller's to choose, and are fetched rather than
+    # defaulted for the reason in the header of lib/snappr/preview.rb. The shell
+    # keys these on the file's mtime and deletes the ones no overlay points at any
+    # more; Ruby has no index and could not tell a stale one from a current one.
+    def overlay_preview(id, request)
+      raise Problem.new(:not_ready) unless @overlay
+
+      result = OverlayPreview.call(svg: request.fetch("svg"), dir: request.fetch("dir"),
+                                   key: request.fetch("key"))
+      emit(**result.merge(id: id, ok: true))
     end
 
     # Config coerces lazily, so a bad background colour or a non-numeric paper

@@ -69,6 +69,12 @@ pub enum Problem<'a> {
     CannotRememberPhotos { detail: String },
     OverlayFileGone { file: String, path: &'a Path },
 
+    // --- The overlay panel. Adding, removing and drawing the cards; what each
+    // overlay then *does* to a photo is the pipeline's half of the catalogue.
+    OverlayNotADrawing { file: String, path: &'a Path },
+    OverlayAlreadyAdded { file: String },
+    CannotDrawOverlays { detail: String },
+
     // --- Acting on one photo.
     PhotoForgotten { path: &'a Path },
     PhotoStillWorking,
@@ -157,8 +163,29 @@ impl Problem<'_> {
                 Some(detail.clone()),
             ),
             OverlayFileGone { file, path } => (
-                format!("The overlay {file} is not there any more. Pick it again."),
+                format!("The overlay {file} is not there any more. Add it again."),
                 Some(path.display().to_string()),
+            ),
+
+            // "drawing" rather than "SVG": the operator picked a file in Finder and
+            // the thing that is wrong with it is that it is not artwork. The
+            // extension belongs in the console half, where it is diagnostic.
+            OverlayNotADrawing { file, path } => (
+                format!(
+                    "{file} is not a drawing snappr can use as an overlay. Export the \
+                     design from your tool as an SVG and add that instead."
+                ),
+                Some(path.display().to_string()),
+            ),
+            OverlayAlreadyAdded { file } => (
+                format!("{file} is already in the overlay panel."),
+                None,
+            ),
+            CannotDrawOverlays { detail } => (
+                "Snappr could not draw the overlay pictures. The overlays themselves \
+                 still work."
+                    .into(),
+                Some(detail.clone()),
             ),
 
             PhotoForgotten { path } => (
@@ -272,7 +299,7 @@ impl Problem<'_> {
 
 /// The last path segment, which is what an operator recognises. Falls back to
 /// the whole path when there is no segment to take.
-fn name_of(path: &Path) -> String {
+pub fn name_of(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())

@@ -33,9 +33,10 @@ module Snappr
       #
       # `slot` names the setting this file came from ("landscape overlay"), and is
       # only ever used in the messages. This module knows nothing about
-      # orientations, but the operator's mental model is the Overlays menu they
+      # orientations, but the operator's mental model is the overlay panel they
       # will go and fix it in, not a bare filename - so the caller that does know
-      # says which slot, and every message here can name it.
+      # says which slot, and every message here can name it. It is optional
+      # because the panel's own card render belongs to no slot at all.
       def render(svg_path, width, height, warnings: nil, slot: nil)
         image = load_svg(stripped_source(svg_path, width, height, slot: slot))
         image = image.has_alpha? ? image : image.add_alpha

@@ -32,9 +32,9 @@ the **default subcommand**, because inside `snappr.app` the binary is invoked ba
 with no arguments - see `cli.rb`. Changing that default breaks the packaged app.
 
 **Newline-delimited JSON on stdin and stdout, one request at a time.** The frame
-grammar is documented in full at the top of `lib/snappr/server.rb`; there are four
-requests (`hello`, `overlay`, `configure`, `ping`) and three reply shapes,
-distinguished by which key is present rather than by a `type` field:
+grammar is documented in full at the top of `lib/snappr/server.rb`; there are five
+requests (`hello`, `overlay`, `overlay_preview`, `configure`, `ping`) and three
+reply shapes, distinguished by which key is present rather than by a `type` field:
 
 | shape | key | meaning |
 |---|---|---|
@@ -68,7 +68,21 @@ never reads `config/snappr.yml` - the app does not call `Config.load` at all.
 **`configure` is the same handler as `hello`.** That is how a settings change
 reaches a running child without a relaunch, and it needs no locking of its own:
 the child handles one frame at a time, so a reconfigure simply queues behind any
-photo in flight. `set_overlay` is the only command that uses it today.
+photo in flight. `set_overlay` and `remove_overlay` are the commands that use it.
+
+**`overlay_preview` is the odd one out: it is about an overlay, not a photo.** It
+renders one SVG at ~440px into a directory the caller names and reports where the
+`#FF00FF` window landed, and it is what the overlay panel's cards draw. Two things
+about it are deliberate:
+
+- **A missing window comes back as `ok: true` with a null `window` and a warning**,
+  not as a failure. The artwork is still worth drawing, and a card that shows the
+  design and says the photo area was not found tells the operator far more than an
+  empty cell. That case *is* the reason the card exists - see "The overlay panel".
+- **`dir` and `key` are `fetch`ed with no default**, the same rule
+  `lib/snappr/preview.rb` follows. Ruby has no index and cannot tell a stale
+  rendering from a current one, so the naming and the collecting are this side's
+  job, exactly as with the preview JPEGs.
 
 **Nothing supervises the child.** This is the gap worth knowing about before
 trusting the app in front of a queue of guests. If Ruby dies, the reader thread
@@ -228,12 +242,27 @@ It is **adjacently tagged and deliberately not `untagged`** - `untagged` turns
 every parse error into "data did not match any variant", which is the one message
 you cannot act on from a log line.
 
-The six tests in `settings.rs` are the only Rust tests in the project, and their
+**The overlay *library* is a new key beside the slots, not a third shape for
+them.** `Settings::overlays` is a `Vec<Overlay>`, so it reuses the element
+`Deserialize` that already reads every historic shape, and `#[serde(default)]` on
+the struct covers the key being absent. Re-spelling `overlay_landscape` as a list
+would have put the watch folder and the printer at risk to gain a panel; a new key
+cannot.
+
+Nothing had to learn any history for it either. `Settings::normalise`, run after
+every successful parse, **derives the library an old file implies**: the sample
+forced to the front, plus whatever either slot already pointed at. So a
+`settings.json` written before the panel existed comes up with the sample and the
+operator's own overlay already in the panel, with no version stamp and no
+migration code.
+
+The tests in `settings.rs` are the only Rust tests in the project, and their
 thesis is stated in the module: the thing worth testing is not that the new shape
 round-trips, it is that none of the old ones can take the watch folder down.
 
-What the three overlay states mean, and how they reach the pipeline, is in
-`CLAUDE.md` under "The overlay SVGs".
+What the overlay states mean, and how they reach the pipeline, is in `CLAUDE.md`
+under "The overlay SVGs"; what the panel does with them is under "The overlay
+panel" below.
 
 ## Printing and sharing
 
@@ -270,6 +299,27 @@ was off. The frontend only paints the target. The whole drop is one unit, so a
 drop carrying several unusable files explains itself once rather than once per
 file.
 
+**A drop is routed by kind, never by where it landed.** `ingest_drop` partitions
+the paths: `.svg` goes to the overlay panel, everything else down the photo path,
+and a mixed drop is split. It is worth knowing why this is not a drop target on
+the panel, because that is the obvious design and it cannot be built:
+
+- Only Rust ever sees a drop's position, and **a Dock drop has no position at
+  all** - it arrives through `RunEvent::Opened`. A panel-shaped target would be a
+  promise the Dock could not keep.
+- Routing by kind is strictly more forgiving anyway. An SVG dropped an inch to the
+  left of the panel is added rather than refused, and there is no coordinate space
+  to get wrong.
+
+The frontend classifies the drag the same way, from the paths on the `enter`
+event, and lights the panel or the Stage accordingly - so it still *reads* as a
+drop target. `enter` is the only event carrying paths, so `over` deliberately
+leaves the classification alone rather than recomputing it.
+
+`watcher::refusal` is untouched by any of this and keeps its "no payload, no I/O"
+contract: the split happens above it, so an SVG never reaches the filter that
+would call it the wrong kind of file.
+
 **Dock drops**: macOS delivers these to the running instance directly, so the
 single-instance plugin is not involved, and a drop on the Dock icon **can be what
 launches the app** - which is why the refusal alert is the OS's own and is raised
@@ -297,8 +347,10 @@ the sidecar and draining, so a path can never fall between the two.
 
 From `tauri.conf.json`, the settings that are decisions rather than taste:
 
-- `assetProtocol.scope` is `$APPDATA/previews/**` - the only reason previews
-  render. Moving `preview_dir` breaks image loading silently.
+- `assetProtocol.scope` is `$APPDATA/previews/**` and `$APPDATA/overlays/**` - the
+  only reason previews and the overlay cards render. The directory choice and the
+  scope entry are one decision in both cases, so moving `preview_dir` or
+  `overlays::dir` breaks image loading silently.
 - `titleBarStyle: "Overlay"` + `hiddenTitle` pairs with the
   `core:window:allow-start-dragging` capability: the frontend draws its own
   titlebar, which is what makes the drag region matter.
@@ -338,19 +390,28 @@ React 18 + Vite + TypeScript, and **Radix Themes 3 carries the whole look**.
 rewrite. Layout, colour, spacing, selection and status all come from Radix
 components, their props and their tokens - a dark-only `<Theme>` in
 `src/main.tsx`. Do not reintroduce an app stylesheet: the point is that there is
-exactly one place the design comes from. Raw CSS survives in three places only,
-each of which Radix genuinely cannot express:
+exactly one place the design comes from. Raw CSS survives only where Radix
+genuinely cannot express the thing, and every one of those is a named constant or
+carries a comment saying why:
 
 - `index.html` sets `margin: 0` on `<body>`. Radix ships no html/body reset, and
   without it the `100vh` grid overflows by the browser's default 8px.
-- `objectFit` is inline on the two `<img>` elements, in `Stage.tsx` and
-  `Filmstrip.tsx`. There is no Radix prop for it, and inline style on an `<img>`
-  is what Radix's own examples do. The comment on the letterbox rule is
+- `objectFit` is inline on the `<img>` elements, in `Stage.tsx`, `Filmstrip.tsx`
+  and `OverlayPanel.tsx`. There is no Radix prop for it, and inline style on an
+  `<img>` is what Radix's own examples do. The comment on the letterbox rule is
   load-bearing: the overlayed and original views have different aspect ratios by
-  design, so the box needs a definite size or a portrait source stretches it.
+  design, so the box needs a definite size or a portrait source stretches it. The
+  panel's is `fill` rather than `contain`, because its box is already the render's
+  own aspect ratio and the artwork has to land on the placeholder exactly.
 - Pixel literals passed *as Radix props* (`height="84px"`,
   `columns="repeat(n, 132px)"`). Those props are typed `"enum | string"` for
   exactly this.
+- `OverlayPanel.tsx` positions the photo-window placeholder with percentages from
+  the fractions Ruby reports, and sizes the card with `aspectRatio` from the
+  overlay's own shape. Neither is a design choice: they are measurements of the
+  file being drawn.
+- `writing-mode: vertical-rl` on the collapsed rail's label. A `transform:
+  rotate()` would leave the layout box unrotated and overflow the rail.
 
 Two things that look like they could be simplified and cannot:
 
@@ -396,31 +457,111 @@ hour.
 `ContextMenu`. This is a macOS-only app and the OS gets placement, keyboard
 handling and dismissal right for nothing.
 
-**The Overlays button is one button, not two**, and it opens a native menu with a
-submenu per orientation. The bar is 44px and already carries the watch toggle, the
-folder, the count and the view control; two more path buttons in it read as
-clutter, and the submenu labels can carry the current choice, which two buttons
-could not. It goes through the same `popup()` helper in `App.tsx` as the filmstrip
-menus, so the keep-one-menu-alive lifetime that comment describes applies here
-too. When both slots are `None` the button says "No overlays" in gray - since a
-fresh install is on the sample, that now means the operator turned both off rather
-than that nothing has loaded.
-
-Inside each submenu the three choices are **check items, not plain ones**: they
-are three settings of one thing, and the tick is what says which is live. Only
-landscape offers "Sample overlay", because that is the only sample drawn, and
-"Reveal Sample overlay in Finder" sits at the *top* level rather than in both
-submenus - there is one sample, and a copy under Portrait would raise the question
-of what it reveals.
-
 A trap worth knowing before touching those menus: Tauri's `MenuItemPayloadKind` is
 `#[serde(untagged)]` and tries `Check` **before** `Submenu`
 (`tauri/src/menu/plugin.rs`), and `CheckMenuItemPayload.checked` is a
 non-optional `bool`. So a plain `{text, checked, action}` object becomes a real
 macOS check item with no ceremony - and **`checked` on a submenu object would
-parse as a check item and make its `items` vanish**. Never put it there.
+parse as a check item and make its `items` vanish**. Never put it there. Nothing
+in the app uses a check item today; the panel replaced the menu that did.
 
-See "The overlay SVGs" in `CLAUDE.md` for what each choice means and how it
+### The titlebar carries nothing
+
+`Toolbar.tsx` is the window's identity and the traffic lights' clearance, and
+that is all. Everything it used to hold moved to where its subject is: the watch
+toggle, the folder and the photo count into the zeroth filmstrip cell, the
+Overlays button into the panel, and the before/after switch down into the Actions
+row beside the buttons that act on the same photo. The bar had become the place
+everything that was not a photo ended up.
+
+Three numbers have to agree and there is one of each: `TOOLBAR_HEIGHT` is exported
+from `Toolbar.tsx` because `App.tsx`'s grid row applies it and
+`trafficLightPosition` in `tauri.conf.json` is set to centre the buttons against
+it. Change the height and the `y` moves with it - roughly `(height - 16) / 2`.
+The `x` there is the close button's own origin, so the clearance `Box` in the
+header has to clear `x + 2 * 20 + 14`.
+
+### The zeroth filmstrip cell
+
+The watch toggle, the watched folder and the photo count live at the **head of the
+filmstrip**, not in the titlebar. That is where the photos come from: `ordered` is
+newest-first, so every arrival lands directly beside the control that decides
+whether arrivals happen at all, and beside the count of what has arrived. In the
+bar they were app chrome, which is not what a drop folder is.
+
+The cell is **outside `RadioCards.Root` and outside the `ScrollArea`**, and both
+halves matter. Inside the radiogroup it would have to be a radio item - selectable,
+and in the arrow keys' roving focus. Inside the scroll area it would slide away
+from the newest photo the moment the strip filled up.
+
+It keeps the pill's **three states, which are the reason it exists**:
+`watch_enabled` is what the operator *asked* for and is not the same as what is
+happening. A watch can fail to start and leave the setting on, and saying
+"Watching" then is a lie the bar told for a while. `RuntimeStatus.watch_error` is
+the third state, and the click handler retries rather than toggling when it is set
+- otherwise the retry the pill offers would *pause*.
+
+### The overlay panel
+
+Overlays are a **library**, not a picker: a collapsible column of cards down the
+left of the photo, one per overlay, each with its own landscape and portrait
+toggles. One overlay can be live for both, or for neither. Adding is a pick or a
+drop; removing is on the card's context menu.
+
+**The picture on each card is a check, not a decoration.** The card paints the
+print's background, then a grey rectangle with a photo icon at exactly the window
+Ruby reported, then the render on top - which has that window punched out of it, so
+the placeholder shows through. An overlay whose `#FF00FF` marker did not survive
+its export puts the icon somewhere obviously wrong, or reports no window at all and
+says so. Before this, that failure was invisible until a print came out wrong.
+
+It only means anything because the render comes back **through librsvg, the same
+renderer the print uses**. Handing the SVG to the webview would show what WebKit
+makes of the file, magenta marker and all, and would prove nothing about what will
+be composited. That is the whole reason `overlay_preview` is a sidecar command
+rather than a `data:` URL.
+
+Four things that are decisions rather than taste:
+
+- **`set_overlay` does all the assignment work, unchanged.** Lighting a card's
+  landscape icon sends that card's overlay; turning it off sends `None`.
+  Exclusivity is free because a slot holds one value, so there is no second command
+  and no way for two cards to show lit for one orientation.
+- **The cards are plain `Card`s, not `RadioCards.Item`s.** There is no "selected
+  overlay" - the toggles carry all the state - and this keeps the panel clear of
+  the Tooltip-around-an-Item trap above.
+- **The orientation pair is two `IconButton`s**, not a `SegmentedControl`.
+  SegmentedControl is single-select and so cannot express "both on", which is the
+  case the panel exists to make possible, and Radix Themes 3 ships no
+  `ToggleGroup`. `gap="1"` and matching sizes are what make them read as a pair.
+- **Adding does not assign.** A card arrives with both toggles dark. An add that
+  quietly took a slot would overwrite a choice the operator had already made.
+
+The collapsed state is **persisted in settings** (`overlays_collapsed`). Overlays
+are set up once and then left alone, so a kiosk that gave the photo back 180px on
+every launch would have to be collapsed again every morning. Collapsed, the rail
+still carries the "Overlays" label - turned on its side with `writing-mode:
+vertical-rl`, not a `transform: rotate()`, which would rotate the glyphs and leave
+a wide layout box overflowing a 36px rail - and the two orientation indicators, lit
+when something is being composited.
+
+`PANEL_WIDTH` and `RAIL_WIDTH` are **exported and applied by `App.tsx`'s grid
+column**, and the panel's own content fills that column with `flexGrow` rather
+than repeating the number. Pinning the inner `Flex` to the same width is how the
+1px `Separator` on the right edge ends up with no room and silently shrinks to
+nothing - which reads as "the border is the wrong colour" rather than as a missing
+element. Both separators are `--accent-a6`; the only question is ever whether they
+have space to draw.
+
+The card's PNG lives in `app_data_dir()/overlays`, keyed on the SVG's path *and*
+mtime. That is the same key discipline as the previews and for the same reason:
+the webview serves an `asset://` URL it has already fetched out of its own memory
+cache for the life of the session, so re-exporting a design under an unchanged key
+would leave the operator looking at the previous artwork. Files no card points at
+are collected on the next refresh - that directory is snappr's, and holds nothing
+else.
+
+See "The overlay SVGs" in `CLAUDE.md` for what each overlay means and how it
 reaches the pipeline.
 
 **The info line under the photo is one truncating `Text`, and every group in it
@@ -563,7 +704,13 @@ Each is argued at its own site; this is an index, not the argument.
 | setting the paper by size rather than PPD name | prints bordered on a SELPHY |
 | dropping the `PICKER` thread-local | the share popover is torn down as it appears |
 | `bundle.fileAssociations` instead of `Info.plist` | loses the named UTIs |
-| narrowing `assetProtocol.scope`, or moving `preview_dir` | previews stop rendering, silently |
+| narrowing `assetProtocol.scope`, or moving `preview_dir` / `overlays::dir` | previews or overlay cards stop rendering, silently |
+| re-spelling `overlay_landscape` as a list instead of adding `overlays` | puts the watch folder and printer behind a fourth on-disk shape |
+| dropping `Settings::normalise` | an existing install opens with an empty panel and its own overlay nowhere in it |
+| keying overlay PNGs on the path alone | a re-exported design keeps showing the old artwork, out of WebKit's cache |
+| rendering the card's SVG in the webview | the card stops being a check - it would show WebKit's render, marker included |
+| making `overlay_preview` fail when no window is found | an unfixable-looking empty card instead of the artwork and the reason |
+| routing drops by pointer position rather than by extension | Dock drops have no position at all |
 | emitting `runtime` without storing it | a late listener waits forever |
 | routing boot's watch failure through `start_watching_noted` | emits the event twice |
 | moving `discard_superseded` before `publish` | a crash in between blanks a live cell |

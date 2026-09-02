@@ -21,6 +21,7 @@
         "resizable": true,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
+        "trafficLightPosition": { "x": 13, "y": 20 },
         "backgroundColor": "#111111",
         "zoomHotkeysEnabled": false
       }
@@ -28,7 +29,7 @@
     "security": {
       "assetProtocol": {
         "enable": true,
-        "scope": ["$APPDATA/previews/**"]
+        "scope": ["$APPDATA/previews/**", "$APPDATA/overlays/**"]
       },
       "csp": {
         "default-src": "'self'",

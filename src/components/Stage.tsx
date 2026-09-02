@@ -2,8 +2,8 @@ import { Box, Button, Callout, Code, Flex, Spinner, Text } from "@radix-ui/theme
 import { ExclamationTriangleIcon, ImageIcon } from "@radix-ui/react-icons";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
-import type { Photo, RuntimeStatus, Settings, View } from "../types";
-import { baseName } from "./Toolbar";
+import type { Drag, Photo, RuntimeStatus, Settings, View } from "../types";
+import { baseName } from "../naming";
 
 /**
  * Letterboxed, and the box must have a definite size for that to work.
@@ -40,15 +40,17 @@ export function Stage({
   settings: Settings | null;
   current: Photo | null;
   view: View;
-  dragging: boolean;
+  dragging: Drag;
   onReprocess: (source: string) => void;
 }) {
   const preview = current?.previews?.[view];
 
   const body = () => {
-    // A file is being dragged over the window. The shell owns the drop and does
-    // the processing; this only says where it will land.
-    if (dragging) {
+    // A photo is being dragged over the window. The shell owns the drop and does
+    // the processing; this only says where it will land. A drag carrying SVGs
+    // says nothing here - that one belongs to the overlay panel, which lights up
+    // its own button instead.
+    if (dragging === "photos") {
       return (
         <Callout.Root color="blue" variant="surface">
           <Callout.Icon>

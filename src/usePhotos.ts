@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
-import type { Orientation, Overlay, Photo, RuntimeStatus, Settings } from "./types";
+import type { Orientation, Overlay, OverlayCard, Photo, RuntimeStatus, Settings } from "./types";
 
 /**
  * The whole of the app's state.
@@ -17,6 +17,13 @@ export function usePhotos() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [runtime, setRuntime] = useState<RuntimeStatus>({ ready: false });
   const [selected, setSelected] = useState<string | null>(null);
+  /**
+   * The overlay panel's cards. A whole-list event rather than the per-record
+   * merge `photo` needs: there are a handful of these, they are re-emitted as
+   * each render lands, and Rust rebuilding the list is cheaper than either side
+   * reconciling one.
+   */
+  const [overlays, setOverlays] = useState<OverlayCard[]>([]);
 
   // Photos are keyed by source path, so an update to one that is already known
   // replaces it in place rather than appending a duplicate.
@@ -62,21 +69,24 @@ export function usePhotos() {
         }),
       );
       keep(await listen<RuntimeStatus>("runtime", (event) => setRuntime(event.payload)));
+      keep(await listen<OverlayCard[]>("overlays", (event) => setOverlays(event.payload)));
 
       // Then pull. The sidecar becomes ready about a second after launch, which is
       // usually before this component has mounted at all, and Tauri does not replay
       // events - so without this read the UI would sit on "starting..." forever.
-      const [loaded, current, status, remembered] = await Promise.all([
+      const [loaded, current, status, remembered, cards] = await Promise.all([
         invoke<Photo[]>("list_photos"),
         invoke<Settings>("get_settings"),
         invoke<RuntimeStatus>("runtime_status"),
         invoke<string | null>("selected_photo"),
+        invoke<OverlayCard[]>("list_overlays"),
       ]);
       if (cancelled) return;
 
       setPhotos(loaded);
       setSettings(current);
       setRuntime(status);
+      setOverlays(cards);
       // Reopen the cell the operator was last on. A remembered source that is no
       // longer in the list falls back to the newest, which is what the app did
       // before it remembered anything.
@@ -136,11 +146,31 @@ export function usePhotos() {
     setSettings(await invoke<Settings>("set_watch_dir", { dir }));
   }, []);
 
-  // The sample, a picked SVG, or nothing - all three are real settings. Rust
+  // One of the panel's overlays, or nothing - both are real settings. Rust
   // re-handshakes the sidecar, so the next photo uses it; the ones already in the
   // strip keep the output they have.
+  //
+  // Nothing here has to clear the overlay off whatever card had it: a slot holds
+  // one value, so setting it is the whole of switching it over. The `overlays`
+  // event that follows carries the new toggle states for every card.
   const changeOverlay = useCallback(async (orientation: Orientation, choice: Overlay) => {
     setSettings(await invoke<Settings>("set_overlay", { orientation, choice }));
+  }, []);
+
+  // Adding does not switch anything on - the card arrives with both toggles dark.
+  // The rendered picture follows on the `overlays` event whenever Ruby gets to it.
+  const addOverlay = useCallback(async (path: string) => {
+    setSettings(await invoke<Settings>("add_overlay", { path }));
+  }, []);
+
+  // Removes the card and empties any slot that used it. Deletes nothing the
+  // operator can see: the SVG is theirs and stays where it is.
+  const removeOverlay = useCallback(async (overlay: Overlay) => {
+    setSettings(await invoke<Settings>("remove_overlay", { overlay }));
+  }, []);
+
+  const setPanelCollapsed = useCallback(async (collapsed: boolean) => {
+    setSettings(await invoke<Settings>("set_panel_collapsed", { collapsed }));
   }, []);
 
   const setWatching = useCallback(async (enabled: boolean) => {
@@ -162,12 +192,16 @@ export function usePhotos() {
     settings,
     runtime,
     selected,
+    overlays,
     setSelected,
     reprocess,
     clearPhoto,
     clearAllPhotos,
     changeWatchDir,
     changeOverlay,
+    addOverlay,
+    removeOverlay,
+    setPanelCollapsed,
     setWatching,
   };
 }

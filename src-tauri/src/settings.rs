@@ -15,12 +15,21 @@ use tauri::{AppHandle, Manager};
 
 use crate::problem::{detail, Problem};
 
+/// What the one overlay snappr ships is called wherever it is named. A constant
+/// because the panel, the log and the settings file all have to agree - the
+/// operator has to recognise the card as the thing Reveal in Finder hands them.
+pub const SAMPLE_NAME: &str = "Sample overlay";
+
 /// The two overlay slots, which are also the two crop shapes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Orientation {
     Landscape,
     Portrait,
+}
+
+impl Orientation {
+    pub const ALL: [Self; 2] = [Self::Landscape, Self::Portrait];
 }
 
 impl Orientation {
@@ -120,6 +129,19 @@ impl<'de> Deserialize<'de> for Overlay {
 }
 
 impl Overlay {
+    /// What the panel and the log call this overlay.
+    ///
+    /// The one place a name is spelled. The frontend used to have its own copy of
+    /// this and it is exactly the kind of thing that drifts, so the card carries a
+    /// name computed here instead.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Sample => SAMPLE_NAME.to_string(),
+            Self::None => "No overlay".to_string(),
+            Self::Custom(path) => crate::problem::name_of(path),
+        }
+    }
+
     /// The file to composite for this slot, or `None` for a plain crop.
     ///
     /// A `Custom` path is passed through *without* checking it exists, on purpose:
@@ -225,6 +247,27 @@ pub struct Settings {
     pub overlay_landscape: Overlay,
     #[serde(alias = "overlay_svg_portrait")]
     pub overlay_portrait: Overlay,
+    /// Every overlay the operator has added, the shipped sample first. The panel
+    /// shows one card per entry; the two slots above say which of them is live for
+    /// each orientation.
+    ///
+    /// **A third shape for the same setting, and deliberately not a third shape for
+    /// the same *key*.** `Overlay`'s hand-written `Deserialize` exists because
+    /// `load` throws the whole file away on a parse error, so re-spelling
+    /// `overlay_landscape` as a list would put the watch folder and the printer at
+    /// risk to gain a panel. A new key beside them cannot: `Vec<Overlay>` reuses the
+    /// element impl that already reads every historic shape, `#[serde(default)]` on
+    /// the struct covers the key being absent, and `normalise` derives the library
+    /// an old file implies. Nothing here had to learn any history.
+    ///
+    /// `Overlay` is `PartialEq`, so the value is the identity - there are no ids to
+    /// keep in step, and a slot pointing at a card is just the two being equal.
+    pub overlays: Vec<Overlay>,
+    /// Whether the overlay panel is showing as a rail rather than a column of
+    /// cards. Overlays are set up once and then left alone, so a kiosk should come
+    /// back the way it was left rather than giving the photo back 180px on every
+    /// launch.
+    pub overlays_collapsed: bool,
     pub extensions: Vec<String>,
     /// Dual-purpose: it names the output file *and* is the watcher's self-output
     /// guard, so it has to match what the Ruby side appends.
@@ -255,6 +298,8 @@ impl Default for Settings {
             watch_enabled: true,
             overlay_landscape: Overlay::Sample,
             overlay_portrait: Overlay::None,
+            overlays: vec![Overlay::Sample],
+            overlays_collapsed: false,
             extensions: default_extensions(),
             output_suffix: default_output_suffix(),
             background: default_background(),
@@ -275,6 +320,88 @@ impl Default for Settings {
 impl Settings {
     pub fn stability_timeout(&self) -> Duration {
         Duration::from_secs(self.stability_timeout_secs)
+    }
+
+    /// The slot for an orientation, so callers stop writing the same two-armed
+    /// match every time they need one.
+    pub fn slot(&self, orientation: Orientation) -> &Overlay {
+        match orientation {
+            Orientation::Landscape => &self.overlay_landscape,
+            Orientation::Portrait => &self.overlay_portrait,
+        }
+    }
+
+    pub fn slot_mut(&mut self, orientation: Orientation) -> &mut Overlay {
+        match orientation {
+            Orientation::Landscape => &mut self.overlay_landscape,
+            Orientation::Portrait => &mut self.overlay_portrait,
+        }
+    }
+
+    /// Which orientations this overlay is live for - the two lit toggles on its
+    /// card. Empty is the ordinary state for an overlay the operator has added but
+    /// not switched on yet.
+    pub fn assigned(&self, overlay: &Overlay) -> Vec<Orientation> {
+        Orientation::ALL.into_iter().filter(|&o| self.slot(o) == overlay).collect()
+    }
+
+    /// Adds an overlay to the library, or reports that it is already there.
+    ///
+    /// Deliberately does *not* switch it on. Adding and assigning are two gestures
+    /// on the card, and an add that silently took over a slot would overwrite a
+    /// choice the operator made without being asked to.
+    pub fn add_overlay(&mut self, overlay: Overlay) -> bool {
+        if self.overlays.contains(&overlay) {
+            return false;
+        }
+        self.overlays.push(overlay);
+        true
+    }
+
+    /// Removes an overlay and empties any slot that pointed at it.
+    ///
+    /// The slots have to be cleared here rather than left dangling: a slot holding
+    /// an overlay with no card would print branding the panel does not show, which
+    /// is the one thing the panel exists to prevent. `Sample` is refused because it
+    /// is not the operator's to delete - it lives in the app bundle - and its card
+    /// simply offers no Remove.
+    pub fn remove_overlay(&mut self, overlay: &Overlay) -> bool {
+        if matches!(overlay, Overlay::Sample) {
+            return false;
+        }
+        let before = self.overlays.len();
+        self.overlays.retain(|held| held != overlay);
+        for orientation in Orientation::ALL {
+            if self.slot(orientation) == overlay {
+                *self.slot_mut(orientation) = Overlay::None;
+            }
+        }
+        self.overlays.len() != before
+    }
+
+    /// The library an existing settings file implies, derived rather than migrated.
+    ///
+    /// Every `settings.json` written before the panel existed has no `overlays` key
+    /// and may have a custom SVG in either slot. Running this after every load means
+    /// such a file opens with a correct panel - the sample plus whatever was already
+    /// picked - and no version stamp, no migration code and no new way for the parse
+    /// to fail.
+    ///
+    /// `Sample` is forced to the front because it is the one card that always
+    /// exists, and a panel whose undeletable entry moved around as the operator
+    /// added and removed others would read as a bug.
+    fn normalise(&mut self) {
+        let mut library = vec![Overlay::Sample];
+        let assigned = [self.overlay_landscape.clone(), self.overlay_portrait.clone()];
+
+        for overlay in self.overlays.drain(..).chain(assigned) {
+            // `None` is how a slot says "nothing here"; it is not something the
+            // panel can show a card for.
+            if overlay != Overlay::None && !library.contains(&overlay) {
+                library.push(overlay);
+            }
+        }
+        self.overlays = library;
     }
 
     pub fn path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -302,8 +429,11 @@ impl Settings {
             // No file at all is the ordinary first launch, and silent is right.
             return (Self::default(), None);
         };
-        match serde_json::from_str(&raw) {
-            Ok(settings) => (settings, None),
+        match serde_json::from_str::<Self>(&raw) {
+            Ok(mut settings) => {
+                settings.normalise();
+                (settings, None)
+            }
             Err(e) => {
                 // Move it aside first. The next save() would otherwise overwrite
                 // it - and the watch toggle saves on its very first click - so
@@ -372,6 +502,15 @@ mod tests {
 
     fn settings(json: &str) -> Settings {
         serde_json::from_str(json).expect("settings must parse")
+    }
+
+    /// What `load` actually hands the app: parsed, then normalised. The tests
+    /// above deliberately stop at the parse, because the parse is what can take
+    /// the whole file down; these ones are about what the panel then sees.
+    fn loaded(json: &str) -> Settings {
+        let mut parsed = settings(json);
+        parsed.normalise();
+        parsed
     }
 
     #[test]
@@ -461,5 +600,97 @@ mod tests {
     #[test]
     fn a_nonsense_slot_is_still_an_error() {
         assert!(serde_json::from_str::<Settings>(r#"{"overlay_landscape": 7}"#).is_err());
+    }
+
+    /// The panel's guarantee: there is always exactly one sample card and it is
+    /// always first.
+    #[test]
+    fn a_file_from_before_the_panel_gets_a_library_with_the_sample_in_it() {
+        let parsed = loaded(r#"{"watch_dir": "/tmp/drop"}"#);
+        assert_eq!(parsed.overlays, vec![Overlay::Sample]);
+        assert!(!parsed.overlays_collapsed, "the panel opens showing its cards the first time");
+    }
+
+    /// An operator who had picked a custom landscape overlay must find it in the
+    /// panel, still switched on - not have to go and pick the same file again.
+    #[test]
+    fn an_overlay_already_in_a_slot_joins_the_library() {
+        let parsed = loaded(
+            r#"{"overlay_svg_landscape": "/brand/wide.svg", "overlay_svg_portrait": null}"#,
+        );
+        assert_eq!(
+            parsed.overlays,
+            vec![Overlay::Sample, Overlay::Custom("/brand/wide.svg".into())]
+        );
+        assert_eq!(parsed.overlay_landscape, Overlay::Custom("/brand/wide.svg".into()));
+        assert_eq!(parsed.overlay_portrait, Overlay::Sample);
+    }
+
+    /// One overlay in both slots is a supported setting - it is what both toggles
+    /// lit on one card means - and must not produce two cards for the one file.
+    #[test]
+    fn the_library_never_holds_the_same_overlay_twice() {
+        let parsed = loaded(
+            r#"{"overlays": [{"kind":"sample"}, {"kind":"custom","path":"/b/w.svg"}],
+                "overlay_landscape": {"kind":"custom","path":"/b/w.svg"},
+                "overlay_portrait": {"kind":"custom","path":"/b/w.svg"}}"#,
+        );
+        assert_eq!(
+            parsed.overlays,
+            vec![Overlay::Sample, Overlay::Custom("/b/w.svg".into())]
+        );
+        assert_eq!(
+            parsed.assigned(&Overlay::Custom("/b/w.svg".into())),
+            vec![Orientation::Landscape, Orientation::Portrait]
+        );
+    }
+
+    /// `None` is a slot saying "nothing here". It is not an overlay and must never
+    /// become a card, or the panel grows an entry that composites nothing.
+    #[test]
+    fn an_empty_slot_does_not_become_a_card() {
+        let parsed = loaded(r#"{"overlay_landscape": {"kind":"none"}, "overlay_portrait": {"kind":"none"}}"#);
+        assert_eq!(parsed.overlays, vec![Overlay::Sample]);
+    }
+
+    /// A slot left pointing at a card that no longer exists would print branding
+    /// the panel does not show - the one thing the panel is there to prevent.
+    #[test]
+    fn removing_an_overlay_empties_the_slots_that_used_it() {
+        let mut parsed = loaded(
+            r#"{"overlays": [{"kind":"sample"}, {"kind":"custom","path":"/b/w.svg"}],
+                "overlay_landscape": {"kind":"custom","path":"/b/w.svg"},
+                "overlay_portrait": {"kind":"sample"}}"#,
+        );
+
+        assert!(parsed.remove_overlay(&Overlay::Custom("/b/w.svg".into())));
+        assert_eq!(parsed.overlays, vec![Overlay::Sample]);
+        assert_eq!(parsed.overlay_landscape, Overlay::None);
+        assert_eq!(parsed.overlay_portrait, Overlay::Sample, "the other slot is untouched");
+    }
+
+    /// The sample lives in the app bundle, so it is not the operator's to delete.
+    /// Its card offers no Remove, and this is the belt to that braces.
+    #[test]
+    fn the_sample_cannot_be_removed() {
+        let mut parsed = loaded("{}");
+        assert!(!parsed.remove_overlay(&Overlay::Sample));
+        assert_eq!(parsed.overlays, vec![Overlay::Sample]);
+    }
+
+    /// Adding is not assigning. An add that took over a slot would overwrite a
+    /// choice the operator made without being asked to.
+    #[test]
+    fn adding_an_overlay_leaves_the_slots_alone_and_refuses_a_duplicate() {
+        let mut parsed = loaded("{}");
+        let brand = Overlay::Custom("/b/w.svg".into());
+
+        assert!(parsed.add_overlay(brand.clone()));
+        assert_eq!(parsed.overlays, vec![Overlay::Sample, brand.clone()]);
+        assert_eq!(parsed.overlay_landscape, Overlay::Sample, "adding must not switch anything on");
+        assert!(parsed.assigned(&brand).is_empty());
+
+        assert!(!parsed.add_overlay(brand.clone()), "the same file must not make a second card");
+        assert_eq!(parsed.overlays.len(), 2);
     }
 }

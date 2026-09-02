@@ -34,12 +34,12 @@ module Snappr
       overlay_window_missing: {
         ui: "The %{slot} %{file} does not show where the photo goes. Open it in your " \
             "design tool and add a magenta rectangle over the area the photo should " \
-            "fill, then pick it again.",
+            "fill, then export it again over the same file.",
         detail: "no #FF00FF marker pixels in %{path}"
       },
       overlay_file_missing: {
-        ui: "The %{slot} %{file} is no longer where it was. Pick it again from the " \
-            "Overlays menu, or put the file back.",
+        ui: "The %{slot} %{file} is no longer where it was. Add it again in the " \
+            "overlay panel, or put the file back.",
         detail: "%{path} does not exist"
       },
       overlay_unreadable: {
@@ -53,9 +53,19 @@ module Snappr
             "write the size automatically.",
         detail: "%{path} has no viewBox and no absolute width/height"
       },
+      # Distinct from overlay_no_size: the file said its size and the size was
+      # unusable, so there is nothing for the operator to add - only a redraw
+      # fixes it. Only the panel's preview hits this; the pipeline never asks an
+      # overlay for its own shape, it stretches it to the paper's.
+      overlay_no_shape: {
+        ui: "The overlay %{file} does not say what shape it was drawn at, so its " \
+            "preview is being shown at the paper's shape. Export it again from " \
+            "your design tool.",
+        detail: "%{path} has a viewBox with a zero or negative height"
+      },
       overlay_missing: {
         ui: "The %{slot} %{file} is missing, so %{orientation} photos are printing " \
-            "with no branding. Pick it again from the Overlays menu.",
+            "with no branding. Add it again in the overlay panel.",
         detail: "%{path} is configured but not on disk"
       },
       aspect_mismatch: {

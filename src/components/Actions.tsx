@@ -1,8 +1,8 @@
 import { forwardRef } from "react";
-import { Box, Button, Flex, Kbd, Text, Tooltip } from "@radix-ui/themes";
+import { Box, Button, Flex, Kbd, SegmentedControl, Text, Tooltip } from "@radix-ui/themes";
 import { MagnifyingGlassIcon, ReloadIcon, Share1Icon } from "@radix-ui/react-icons";
 
-import type { Exif, Level, Notice, Photo } from "../types";
+import type { Exif, Level, Notice, Photo, View } from "../types";
 import { relativeTime } from "../relativeTime";
 
 /**
@@ -178,12 +178,17 @@ export const Actions = forwardRef<
     busy: "share" | "print" | null;
     problem: Notice | null;
     now: number;
+    view: View;
+    onView: (view: View) => void;
     onReprocess: (source: string) => void;
     onReveal: () => void;
     onShare: () => void;
     onPrint: () => void;
   }
->(function Actions({ current, ready, busy, problem, now, onReprocess, onReveal, onShare, onPrint }, shareRef) {
+>(function Actions(
+  { current, ready, busy, problem, now, view, onView, onReprocess, onReveal, onShare, onPrint },
+  shareRef,
+) {
   const working = current?.status === "processing" || current?.status === "queued";
 
   return (
@@ -191,6 +196,26 @@ export const Actions = forwardRef<
       <Box flexGrow="1" minWidth="0">
         <Info current={current} ready={ready} problem={problem} now={now} />
       </Box>
+
+      {/* The before/after switch sits with the buttons rather than in the
+          titlebar, because it acts on the photo the way they do and reads as one
+          row of things you can do to what is on screen. `mr="2"` on top of the
+          row's own gap keeps it a group of its own - it changes what you are
+          looking at, where the four to its right act on it. */}
+      <Flex flexShrink="0" mr="2">
+        {/* No `size`, like the buttons to its right: both take Radix's default
+            size 2, which is what makes the control the same height as them. */}
+        <SegmentedControl.Root
+          value={view}
+          disabled={!ready}
+          onValueChange={(value) => onView(value as View)}
+          aria-label="Which version to show"
+        >
+          {/* disabled lives on the Root: SegmentedControl.Item's type removes it. */}
+          <SegmentedControl.Item value="overlay">Overlayed</SegmentedControl.Item>
+          <SegmentedControl.Item value="source">Original</SegmentedControl.Item>
+        </SegmentedControl.Root>
+      </Flex>
 
       <Flex gap="2" flexShrink="0">
         <Tooltip content="Run the overlay again for this photo">

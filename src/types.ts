@@ -53,9 +53,16 @@ export interface Settings {
   /**
    * What each orientation composites. Landscape starts on the shipped sample,
    * portrait on nothing - there is no portrait sample drawn.
+   *
+   * These are the two slots the panel's toggles set. The panel itself reads
+   * `OverlayCard.landscape` / `.portrait` rather than comparing against these:
+   * the comparison is structural, and one place for the rule is enough.
    */
   overlay_landscape: Overlay;
   overlay_portrait: Overlay;
+  /** Every overlay in the panel, the shipped sample first. */
+  overlays: Overlay[];
+  overlays_collapsed: boolean;
   extensions: string[];
   output_suffix: string;
   background: string;
@@ -130,3 +137,54 @@ export type Overlay =
   | { kind: "sample" }
   | { kind: "none" }
   | { kind: "custom"; path: string };
+
+/**
+ * Where the photo goes inside an overlay, as fractions of the frame in 0..1.
+ * The panel draws its grey photo-icon placeholder at exactly this rectangle.
+ */
+export interface Window {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * One card in the overlay panel. Mirrors `OverlayCard` in
+ * `src-tauri/src/overlays.rs`.
+ *
+ * `thumb` is a PNG rendered by librsvg - the same renderer the print uses - with
+ * the photo window left transparent. That is what makes the card a check rather
+ * than a decoration: the placeholder shows through exactly where snappr found the
+ * marker, so an overlay whose window did not survive its export is visible before
+ * anything is printed. `window` is null when no marker was found at all, and the
+ * card says so while still drawing the artwork.
+ */
+export interface OverlayCard {
+  overlay: Overlay;
+  name: string;
+  /** False for the sample, which lives in the app bundle. */
+  removable: boolean;
+  landscape: boolean;
+  portrait: boolean;
+  /** Absent until the render lands - the card shows a skeleton meanwhile. */
+  thumb?: string;
+  /**
+   * The shape the overlay was *drawn* at, which is what the card is sized to. So
+   * an overlay drawn at the wrong ratio for the paper looks wrong on its card,
+   * rather than being quietly squashed to fit.
+   */
+  aspect?: number;
+  window?: Window;
+  /** The overlay is configured and its file has gone. */
+  missing: boolean;
+  error?: string;
+  warnings: string[];
+}
+
+/**
+ * What is being dragged over the window, decided from the paths Tauri reports on
+ * `enter`. SVGs are overlays and everything else is a photo, so the right target
+ * can light up - the drop itself is routed the same way, on the Rust side.
+ */
+export type Drag = "photos" | "overlays" | null;

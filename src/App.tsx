@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Flex, Grid } from "@radix-ui/themes";
+import { Box, Flex, Grid } from "@radix-ui/themes";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Menu, type MenuOptions } from "@tauri-apps/api/menu";
@@ -8,11 +8,12 @@ import { confirm, open } from "@tauri-apps/plugin-dialog";
 
 import { usePhotos } from "./usePhotos";
 import { useNow } from "./useNow";
-import { Toolbar, baseName, overlayName, SAMPLE_NAME } from "./components/Toolbar";
+import { Toolbar, TOOLBAR_HEIGHT } from "./components/Toolbar";
 import { Stage } from "./components/Stage";
 import { Actions } from "./components/Actions";
 import { Filmstrip } from "./components/Filmstrip";
-import type { Notice, Orientation, Overlay, Photo, View } from "./types";
+import { OverlayPanel, PANEL_WIDTH, RAIL_WIDTH } from "./components/OverlayPanel";
+import type { Drag, Notice, Orientation, OverlayCard, Photo, View } from "./types";
 
 export default function App() {
   const {
@@ -20,12 +21,16 @@ export default function App() {
     settings,
     runtime,
     selected,
+    overlays,
     setSelected,
     reprocess,
     clearPhoto,
     clearAllPhotos,
     changeWatchDir,
     changeOverlay,
+    addOverlay,
+    removeOverlay,
+    setPanelCollapsed,
     setWatching,
   } = usePhotos();
   const [view, setView] = useState<View>("overlay");
@@ -38,7 +43,7 @@ export default function App() {
    * where red would have the operator reaching for Try again.
    */
   const [problem, setProblem] = useState<Notice | null>(null);
-  const [dragging, setDragging] = useState(false);
+  const [dragging, setDragging] = useState<Drag>(null);
   const shareButton = useRef<HTMLButtonElement>(null);
   const contextMenu = useRef<Menu | null>(null);
   const now = useNow();
@@ -107,6 +112,15 @@ export default function App() {
   // something is being dragged over the window. The preventDefault pair is
   // insurance for the day someone turns dragDropEnabled off again: without it
   // WKWebView navigates to the dropped file and the app is gone.
+  //
+  // The *kind* of drag matters now, because a drop can be either a photo or an
+  // overlay. It is decided from the paths - SVGs are overlays - and never from
+  // where the pointer is: Rust routes the drop the same way, and it has to,
+  // because a drop on the Dock icon has no position at all. So a drop target
+  // shaped like the panel would be a promise the Dock could not keep.
+  //
+  // `enter` is the only event carrying paths, so the classification is kept and
+  // `over` leaves it alone rather than resetting it.
   useEffect(() => {
     const swallow = (event: DragEvent) => event.preventDefault();
     window.addEventListener("dragover", swallow);
@@ -116,7 +130,14 @@ export default function App() {
     let unlisten: (() => void) | undefined;
     getCurrentWebview()
       .onDragDropEvent((event) => {
-        setDragging(event.payload.type === "enter" || event.payload.type === "over");
+        if (event.payload.type === "enter") {
+          const svgs = event.payload.paths.filter((path) => path.toLowerCase().endsWith(".svg"));
+          // A mixed drop counts as photos: that is the half with somewhere to
+          // land on screen, and both halves are handled either way.
+          setDragging(svgs.length === event.payload.paths.length && svgs.length > 0 ? "overlays" : "photos");
+        } else if (event.payload.type !== "over") {
+          setDragging(null);
+        }
       })
       .then((off) => (cancelled ? off() : (unlisten = off)));
 
@@ -329,16 +350,14 @@ export default function App() {
     }
   };
 
-  const overlayOf = (orientation: Orientation): Overlay =>
-    (orientation === "landscape" ? settings?.overlay_landscape : settings?.overlay_portrait) ?? {
-      kind: "none",
-    };
-
-  const setOverlay = useCallback(
-    async (orientation: Orientation, choice: Overlay) => {
+  // Lighting a card's orientation icon is a plain slot assignment: a slot holds
+  // one value, so setting it is also what turns the previous card's icon off.
+  // There is nothing here that has to go and clear the other cards.
+  const toggleOverlay = useCallback(
+    async (card: OverlayCard, orientation: Orientation, on: boolean) => {
       setProblem(null);
       try {
-        await changeOverlay(orientation, choice);
+        await changeOverlay(orientation, on ? card.overlay : { kind: "none" });
       } catch (error) {
         fail(error);
       }
@@ -346,70 +365,60 @@ export default function App() {
     [changeOverlay],
   );
 
-  const pickOverlay = async (orientation: Orientation) => {
-    const current = overlayOf(orientation);
-    const chosen = await open({
-      multiple: false,
-      filters: [{ name: "SVG", extensions: ["svg"] }],
-      defaultPath: current.kind === "custom" ? current.path : undefined,
-    });
-    if (typeof chosen === "string") await setOverlay(orientation, { kind: "custom", path: chosen });
+  // Adds a card, and only that - the operator lights the orientation they want
+  // afterwards. An add that quietly took a slot would overwrite a choice they had
+  // already made.
+  const pickOverlay = async () => {
+    const chosen = await open({ multiple: false, filters: [{ name: "SVG", extensions: ["svg"] }] });
+    if (typeof chosen !== "string") return;
+    setProblem(null);
+    try {
+      await addOverlay(chosen);
+    } catch (error) {
+      fail(error);
+    }
   };
 
-  // One slot per orientation, each a submenu, so the label can carry the current
-  // choice and the whole state reads at a glance.
-  //
-  // The choices are check items rather than plain ones: they are three settings of
-  // one thing, not three actions, and the tick is what says which is live. A plain
-  // object with a `checked` key is enough - Tauri's MenuItemPayloadKind is untagged
-  // and tries Check before Submenu. The corollary is a trap: never put `checked` on
-  // a submenu object, or it parses as a check item and its `items` vanish.
-  //
-  // Only landscape offers "Sample overlay", because that is the only sample drawn.
-  // Reveal sits at the top level rather than in both submenus: there is one sample,
-  // and a copy under Portrait would raise the question of what it reveals.
-  const overlayMenu = () => {
-    const slot = (orientation: Orientation, label: string) => {
-      const current = overlayOf(orientation);
-      const choice = (id: string, text: string, chosen: Overlay) => ({
-        id: `${id}-${orientation}`,
-        text,
-        checked: current.kind === chosen.kind,
-        action: () => void setOverlay(orientation, chosen),
-      });
+  const forgetOverlay = async (card: OverlayCard) => {
+    setProblem(null);
+    try {
+      await removeOverlay(card.overlay);
+    } catch (error) {
+      fail(error);
+    }
+  };
 
-      return {
-        id: `overlay-${orientation}`,
-        text: `${label}: ${overlayName(current)}`,
-        items: [
-          ...(orientation === "landscape"
-            ? [choice("sample", SAMPLE_NAME, { kind: "sample" })]
-            : []),
-          {
-            id: `pick-${orientation}`,
-            // The filename rather than a bare "Choose...", so the item says what
-            // is currently picked without the operator opening the dialog to find out.
-            text: current.kind === "custom" ? `${baseName(current.path)}...` : "Choose...",
-            checked: current.kind === "custom",
-            action: () => void pickOverlay(orientation),
-          },
-          choice("clear", "No overlay", { kind: "none" }),
-        ],
-      };
-    };
-
+  // Native, like the filmstrip's - see the note on popup() above. Remove is absent
+  // rather than disabled on the sample: it lives in the app bundle and is not the
+  // operator's to delete, and a greyed-out item invites a click that can never
+  // work.
+  const cardMenu = (card: OverlayCard) => (event: React.MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
     void popup([
-      slot("landscape", "Landscape"),
-      slot("portrait", "Portrait"),
-      { item: "Separator" as const },
       {
-        id: "reveal-sample",
-        text: `Reveal ${SAMPLE_NAME} in Finder`,
+        id: "reveal-overlay",
+        text: "Reveal in Finder",
+        enabled: !card.missing,
         action: () => {
-          invoke("reveal_sample_overlay").catch(fail);
+          invoke("reveal_overlay", { overlay: card.overlay }).catch(fail);
         },
       },
+      ...(card.removable
+        ? [
+            { item: "Separator" as const },
+            { id: "remove-overlay", text: "Remove", action: () => void forgetOverlay(card) },
+          ]
+        : []),
     ]);
+  };
+
+  const collapsePanel = async (collapsed: boolean) => {
+    try {
+      await setPanelCollapsed(collapsed);
+    } catch (error) {
+      fail(error);
+    }
   };
 
   const reveal = () => {
@@ -417,18 +426,28 @@ export default function App() {
     invoke("reveal_photo", { source: current.source }).catch((error) => fail(error));
   };
 
+  // The bar and the strip span both columns; only the middle row is split. The
+  // overlay panel belongs beside the *photo* - it is what will be drawn over it -
+  // while the strip stays full width so the zeroth cell sits at the window's edge
+  // and the photos run the whole way across.
   return (
-    <Grid rows="44px minmax(0, 1fr) 140px" height="100vh">
-      <Toolbar
+    <Grid
+      rows={`${TOOLBAR_HEIGHT} minmax(0, 1fr) 140px`}
+      columns={`${(settings?.overlays_collapsed ?? false) ? RAIL_WIDTH : PANEL_WIDTH} minmax(0, 1fr)`}
+      height="100vh"
+    >
+      <Box gridColumn="1 / -1">
+        <Toolbar />
+      </Box>
+
+      <OverlayPanel
+        cards={overlays}
         settings={settings}
-        count={ordered.length}
-        view={view}
-        onView={setView}
-        viewEnabled={ready}
-        onToggleWatching={() => void toggleWatching()}
-        onPickWatchDir={pickWatchDir}
-        onOverlays={overlayMenu}
-        watchProblem={runtime.watch_error ?? null}
+        dragging={dragging === "overlays"}
+        onToggle={(card, orientation, on) => void toggleOverlay(card, orientation, on)}
+        onAdd={() => void pickOverlay()}
+        onCardMenu={cardMenu}
+        onCollapse={(collapsed) => void collapsePanel(collapsed)}
       />
 
       <Flex direction="column" minHeight="0">
@@ -447,6 +466,8 @@ export default function App() {
           busy={busy}
           problem={problem}
           now={now}
+          view={view}
+          onView={setView}
           onReprocess={reprocess}
           onReveal={reveal}
           onShare={() => act("share")}
@@ -454,13 +475,20 @@ export default function App() {
         />
       </Flex>
 
-      <Filmstrip
-        photos={ordered}
-        selected={selected}
-        onSelect={setSelected}
-        onCellMenu={cellMenu}
-        onStripMenu={stripMenu}
-      />
+      <Box gridColumn="1 / -1" minHeight="0">
+        <Filmstrip
+          photos={ordered}
+          selected={selected}
+          settings={settings}
+          runtime={runtime}
+          count={ordered.length}
+          onSelect={setSelected}
+          onCellMenu={cellMenu}
+          onStripMenu={stripMenu}
+          onToggleWatching={() => void toggleWatching()}
+          onPickWatchDir={pickWatchDir}
+        />
+      </Box>
     </Grid>
   );
 }

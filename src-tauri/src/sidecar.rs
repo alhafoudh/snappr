@@ -119,6 +119,21 @@ impl Sidecar {
         self.request(json!({ "cmd": "overlay", "source": source }))
     }
 
+    /// Renders one overlay for its card in the panel, and reports where the photo
+    /// window landed inside it.
+    ///
+    /// `dir` and `key` are this side's to choose because this side is the one that
+    /// can tell a stale thumbnail from a current one - Ruby has no index, exactly
+    /// as with the preview JPEGs. They are named in the frame rather than taken
+    /// from the handshake so the panel's files can never end up among the photo
+    /// previews, whose lifetimes are completely different.
+    ///
+    /// Queues behind whatever the child is doing, like everything else here, which
+    /// is why the caller runs it off the UI thread.
+    pub fn overlay_preview(&self, svg: &str, dir: &str, key: &str) -> Result<Value, String> {
+        self.request(json!({ "cmd": "overlay_preview", "svg": svg, "dir": dir, "key": key }))
+    }
+
     /// Hands a running child new settings, so changing an overlay does not mean
     /// restarting Ruby. `configure` is the same handler as `hello` on the other
     /// side, which rebuilds Config, Overlay and Preview from scratch.

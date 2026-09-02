@@ -237,8 +237,8 @@ module Snappr
       overlay
     end
 
-    # How a message names an overlay slot: the same words the Overlays menu uses,
-    # so the operator knows which of the two to go and fix.
+    # How a message names an overlay slot: the same words the overlay panel's
+    # toggles use, so the operator knows which of the two to go and fix.
     def slot_for(orientation) = "#{orientation} overlay"
 
     # The overlay is stretched to fill the frame, so one drawn at the wrong shape

@@ -133,6 +133,48 @@ class ServerTest < Minitest::Test
     assert_equal "not_ready", responses[0]["error"]["code"]
   end
 
+  # The overlay panel's card. Nothing to do with a photo, so it takes no source -
+  # but it does take its destination explicitly, and the window it reports is what
+  # the panel positions its photo-icon placeholder with.
+  def test_overlay_preview_renders_a_card_for_one_overlay
+    thumbs = File.join(@dir, "overlays")
+    responses, = converse(hello_frame, { id: 2, cmd: "overlay_preview", key: "abc123",
+                                         svg: fixture("window-landscape.svg").to_s, dir: thumbs })
+
+    card = responses[1]
+    assert_equal true, card["ok"]
+    assert_equal File.join(thumbs, "abc123.png"), card["thumb"]
+    assert_path_exists card["thumb"]
+    assert_in_delta 2960.0 / 2000, card["aspect"], 0.001
+    assert_in_delta 80.0 / 2960, card["window"]["x"], 0.005
+    assert_in_delta 1616.0 / 2960, card["window"]["width"], 0.005
+    assert_equal [], card["warnings"]
+  end
+
+  # An overlay whose marker did not survive the export is the failure the card is
+  # there to make visible, so it comes back as a *success* carrying a null window
+  # and a warning. Failing the request would leave an empty cell and say nothing.
+  def test_overlay_preview_reports_a_missing_window_rather_than_failing
+    responses, = converse(hello_frame, { id: 2, cmd: "overlay_preview", key: "k",
+                                         svg: fixture("absolute.svg").to_s,
+                                         dir: File.join(@dir, "overlays") })
+
+    card = responses[1]
+    assert_equal true, card["ok"]
+    assert_nil card["window"]
+    assert_path_exists card["thumb"], "the artwork still has to be drawn"
+    assert_equal ["overlay_window_missing"], card["warnings"].map { |w| w["kind"] }
+  end
+
+  # Gated on the handshake like `overlay`, because the fallback shape it uses for
+  # an overlay that does not declare one comes from the paper settings.
+  def test_overlay_preview_before_hello_is_refused
+    responses, = converse({ id: 1, cmd: "overlay_preview", key: "k", svg: "/tmp/x.svg", dir: @dir })
+
+    assert_equal false, responses[0]["ok"]
+    assert_equal "not_ready", responses[0]["error"]["code"]
+  end
+
   def test_malformed_json_does_not_stop_the_loop
     input = StringIO.new("{not json\n#{JSON.generate(hello_frame)}\n")
     output = StringIO.new

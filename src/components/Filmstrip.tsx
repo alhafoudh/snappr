@@ -1,8 +1,9 @@
-import { Box, Flex, RadioCards, ScrollArea, Separator, Skeleton, Text, Tooltip } from "@radix-ui/themes";
-import { DotFilledIcon } from "@radix-ui/react-icons";
+import { Box, Button, Card, Flex, RadioCards, ScrollArea, Separator, Skeleton, Text, Tooltip } from "@radix-ui/themes";
+import { DotFilledIcon, FileIcon } from "@radix-ui/react-icons";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
-import type { Photo } from "../types";
+import { baseName } from "../naming";
+import type { Photo, RuntimeStatus, Settings } from "../types";
 
 const CELL_WIDTH = 132;
 const FRAME_HEIGHT = "84px";
@@ -69,6 +70,95 @@ function Cell({ photo, onMenu }: { photo: Photo; onMenu: (event: React.MouseEven
 }
 
 /**
+ * The zeroth cell: where the photos come from.
+ *
+ * This is the head of the strip because that is where the arrivals appear -
+ * `ordered` is newest-first, so every photo that lands does so directly beside
+ * it, and the control that decides whether they land at all is right there. It
+ * used to live in the 44px titlebar, which is app chrome and is not what the
+ * watch folder is.
+ *
+ * **Outside `RadioCards.Root`, and outside the ScrollArea.** Inside the
+ * radiogroup it would have to be a radio item, which would make it selectable and
+ * put it in the arrow keys' roving focus; inside the scroll area it would slide
+ * away from the newest photo the moment the strip filled up.
+ *
+ * The three-state watch logic is carried over from the toolbar unchanged, and is
+ * the point of the cell: `watch_enabled` is what the operator *asked* for, which
+ * is not the same as what is happening. A watch can fail to start and leave the
+ * setting on, and saying "Watching" then is a lie the bar told for a while.
+ */
+function WatchCell({
+  settings,
+  count,
+  watchProblem,
+  onToggleWatching,
+  onPickWatchDir,
+}: {
+  settings: Settings | null;
+  count: number;
+  watchProblem: string | null;
+  onToggleWatching: () => void;
+  onPickWatchDir: () => void;
+}) {
+  const wanted = settings?.watch_enabled ?? false;
+  const failed = wanted && watchProblem !== null;
+  const watching = wanted && !failed;
+
+  return (
+    // asChild so the cell can be given a height: Card carries no height prop, and
+    // the cell has to match the photo cells beside it rather than shrink to its
+    // two buttons.
+    <Card size="1" asChild>
+      <Box height="100%">
+        <Flex direction="column" gap="2" justify="center" height="100%">
+          <Tooltip
+            content={
+              failed
+                ? `${watchProblem} Click to try again.`
+                : watching
+                  ? "Watching the folder - click to pause"
+                  : "Paused - click to watch the folder"
+            }
+          >
+            <Button
+              size="1"
+              variant="outline"
+              color={failed ? "red" : "gray"}
+              onClick={onToggleWatching}
+              disabled={!settings}
+              aria-pressed={watching}
+            >
+              {/* A dot rather than a switch: the word says what it is doing and
+                  the dot says it at a glance from across the room. Red is the
+                  third state - asked for, and not happening. */}
+              <Text color={failed ? "red" : watching ? "blue" : "gray"} asChild>
+                <DotFilledIcon />
+              </Text>
+              {failed ? "Not watching" : watching ? "Watching" : "Paused"}
+            </Button>
+          </Tooltip>
+
+          <Tooltip content={settings ? `Watching ${settings.watch_dir} - click to change` : "Loading..."}>
+            <Button size="1" variant="soft" color="gray" onClick={onPickWatchDir} disabled={!settings}>
+              <FileIcon />
+              <Text truncate>{settings ? baseName(settings.watch_dir) : "..."}</Text>
+            </Button>
+          </Tooltip>
+
+          {/* How many cells are in the strip, in the cell the strip starts with.
+              It was a titlebar label, which is the wrong place for a fact about
+              the strip - here it is right beside what it counts. */}
+          <Text size="1" color="gray" align="center">
+            {count} photo{count === 1 ? "" : "s"}
+          </Text>
+        </Flex>
+      </Box>
+    </Card>
+  );
+}
+
+/**
  * RadioCards rather than a row of buttons: the selection ring, the hover and
  * focus states, the roving arrow-key focus and the radiogroup semantics all come
  * with it, which is most of what the old stylesheet was for.
@@ -76,35 +166,59 @@ function Cell({ photo, onMenu }: { photo: Photo; onMenu: (event: React.MouseEven
 export function Filmstrip({
   photos,
   selected,
+  settings,
+  runtime,
+  count,
   onSelect,
   onCellMenu,
   onStripMenu,
+  onToggleWatching,
+  onPickWatchDir,
 }: {
   photos: Photo[];
   selected: string | null;
+  settings: Settings | null;
+  runtime: RuntimeStatus;
+  count: number;
   onSelect: (source: string) => void;
   onCellMenu: (photo: Photo) => (event: React.MouseEvent) => void;
   onStripMenu: (event: React.MouseEvent) => void;
+  onToggleWatching: () => void;
+  onPickWatchDir: () => void;
 }) {
   return (
-    <Flex direction="column" minHeight="0">
+    // height="100%" for the same reason as the toolbar's: a column Flex sizes to
+    // its content, so without it the strip does not fill its grid row and the
+    // watch cell has no height to match the photo cells against.
+    <Flex direction="column" height="100%" minHeight="0">
       <Separator size="4" />
-      <ScrollArea scrollbars="horizontal" type="hover">
-        <Box p="3" onContextMenu={onStripMenu} height="100%">
-          <RadioCards.Root
-            size="1"
-            gap="2"
-            columns={`repeat(${Math.max(photos.length, 1)}, ${CELL_WIDTH}px)`}
-            value={selected ?? ""}
-            onValueChange={onSelect}
-            aria-label="Photos"
-          >
-            {photos.map((photo) => (
-              <Cell key={photo.source} photo={photo} onMenu={onCellMenu(photo)} />
-            ))}
-          </RadioCards.Root>
+      <Flex direction="row" minHeight="0" align="stretch">
+        <Box pl="3" py="3" flexShrink="0" width={`${CELL_WIDTH + 20}px`}>
+          <WatchCell
+            settings={settings}
+            count={count}
+            watchProblem={runtime.watch_error ?? null}
+            onToggleWatching={onToggleWatching}
+            onPickWatchDir={onPickWatchDir}
+          />
         </Box>
-      </ScrollArea>
+        <ScrollArea scrollbars="horizontal" type="hover">
+          <Box p="3" onContextMenu={onStripMenu} height="100%">
+            <RadioCards.Root
+              size="1"
+              gap="2"
+              columns={`repeat(${Math.max(photos.length, 1)}, ${CELL_WIDTH}px)`}
+              value={selected ?? ""}
+              onValueChange={onSelect}
+              aria-label="Photos"
+            >
+              {photos.map((photo) => (
+                <Cell key={photo.source} photo={photo} onMenu={onCellMenu(photo)} />
+              ))}
+            </RadioCards.Root>
+          </Box>
+        </ScrollArea>
+      </Flex>
     </Flex>
   );
 }

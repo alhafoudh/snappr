@@ -7,6 +7,7 @@
 
 #[cfg(target_os = "macos")]
 mod mac;
+mod overlays;
 mod photo;
 mod problem;
 mod runtime;
@@ -21,8 +22,9 @@ use tauri::{AppHandle, DragDropEvent, Emitter, Manager, State, WebviewWindow, Wi
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_window_state::StateFlags;
 
+use overlays::OverlayCard;
 use photo::{Index, Photo, Status};
-use problem::{detail, Problem};
+use problem::{detail, name_of, Problem};
 use runtime::Runtime;
 use settings::{Orientation, Overlay, Settings};
 use sidecar::Sidecar;
@@ -69,6 +71,18 @@ pub struct AppState {
     /// Photos handed to the app before the sidecar was up - a drop on the Dock
     /// icon can be what launches the app. Drained by the boot thread.
     pending: Mutex<Vec<PathBuf>>,
+    /// What Ruby made of each overlay, keyed the same way its PNG is named. Not
+    /// persisted: the PNGs on disk are, and a render is cheap enough that losing
+    /// the map across a launch costs one pass through the panel.
+    overlays: Mutex<overlays::Cache>,
+    /// Held for the whole of one `overlays::refresh`, so only one runs at a time.
+    ///
+    /// Not about the cache - that has its own lock - but about the collection pass
+    /// at the end. Two refreshes overlapping means the older one sweeps with a
+    /// stale idea of which overlays exist and deletes the PNG the newer one has
+    /// just written, leaving a card pointing at a file that is gone. Adding an
+    /// overlay while the boot refresh is still going is exactly that race.
+    drawing: Mutex<()>,
 }
 
 /// Stores the status and announces it, in that order, so a listener that arrives
@@ -160,7 +174,20 @@ fn process(app: AppHandle, source: PathBuf) {
 /// processed and refused ones are collected, so a mixed drop still prints the
 /// photos it can and only explains the rest.
 fn ingest_drop(app: &AppHandle, paths: Vec<PathBuf>) {
-    let refused: Vec<(PathBuf, Refusal)> = paths
+    // An SVG is artwork, not a photo, so it goes to the overlay panel. Split by
+    // kind rather than by where in the window the file landed: only Rust ever sees
+    // a drop's position, and a drop on the Dock icon has no position at all - so
+    // a panel-shaped drop target could not be made to work from the Dock, and an
+    // SVG dropped an inch to the left of it would be refused for no reason the
+    // operator could see. Dropping one anywhere adds it; the panel lights up
+    // because the frontend classifies the drag the same way.
+    let (drawings, photos): (Vec<PathBuf>, Vec<PathBuf>) = paths.into_iter().partition(|path| is_drawing(path));
+
+    if !drawings.is_empty() {
+        add_overlays(app, drawings);
+    }
+
+    let refused: Vec<(PathBuf, Refusal)> = photos
         .into_iter()
         .filter_map(|path| ingest_one(app, path).err())
         .collect();
@@ -168,6 +195,40 @@ fn ingest_drop(app: &AppHandle, paths: Vec<PathBuf>) {
     if !refused.is_empty() {
         explain_refusals(app, refused);
     }
+}
+
+/// The one place "is this an overlay?" is decided, so the drop router and
+/// `add_overlay` cannot disagree about what the panel accepts.
+fn is_drawing(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
+}
+
+/// Adds dropped drawings to the library and redraws the panel.
+///
+/// Quiet on a duplicate: dropping a design the operator already has is not a
+/// mistake worth an alert, and the card is right there showing it is already
+/// present. A *picked* duplicate does say so - see `add_overlay` - because the
+/// operator went through a dialog to choose it and silence would read as a
+/// failure.
+fn add_overlays(app: &AppHandle, paths: Vec<PathBuf>) {
+    let state = app.state::<AppState>();
+    let mut settings = state.settings.lock().unwrap();
+    let added = paths
+        .into_iter()
+        .filter(|path| path.is_file())
+        .filter(|path| settings.add_overlay(Overlay::Custom(path.clone())))
+        .count();
+    if added == 0 {
+        return;
+    }
+    if let Err(e) = settings.save(app) {
+        log::warn!("cannot save the overlay library: {e}");
+    }
+    drop(settings);
+
+    overlays::announce(app);
+    overlays::refresh(app.clone());
 }
 
 /// The entry point for one photo that arrived by hand - dropped on the window or
@@ -403,22 +464,28 @@ fn set_watch_dir(app: AppHandle, state: State<AppState>, dir: PathBuf) -> Result
     Ok(updated)
 }
 
-/// Sets what one orientation composites: the shipped sample, a picked SVG, or
+/// Sets what one orientation composites: one of the overlays in the panel, or
 /// nothing.
 ///
-/// None of the three is a broken state. Nothing at all still prints - the photo is
-/// cropped to the print ratio with nothing over it - and the sample is what a fresh
-/// install lands on so that a first photo shows something rather than looking like
-/// the app did not run.
+/// This is the whole of what the cards' toggles do. Lighting a card's landscape
+/// icon sends that card's overlay; turning it off sends `None`. Exclusivity comes
+/// for free because a slot holds one value, so switching an overlay on
+/// automatically switches it off wherever it was - no second command, and no way
+/// for the panel to show two cards lit for one orientation.
+///
+/// Neither state is broken. Nothing at all still prints - the photo is cropped to
+/// the print ratio with nothing over it - and the sample is what a fresh install
+/// lands on so that a first photo shows something rather than looking like the app
+/// did not run.
 ///
 /// Only that a picked file exists is checked. An SVG with no #FF00FF window, or one
 /// drawn at the wrong shape, comes back as a warning on the photo itself - which
-/// the filmstrip and the Actions bar already show - rather than as a rejected pick,
-/// because that is where the operator can see it against the result.
+/// the filmstrip and the Actions bar already show - and now on the card as well,
+/// rather than as a rejected pick.
 ///
 /// Photos already in the strip keep their output. Regenerating one is what the
 /// retry button is for; silently rewriting a strip's worth of 10-25 MB PNGs
-/// because a menu item was clicked is not worth the surprise.
+/// because a toggle was clicked is not worth the surprise.
 #[tauri::command]
 fn set_overlay(
     app: AppHandle,
@@ -428,41 +495,147 @@ fn set_overlay(
 ) -> Result<Settings, String> {
     if let Overlay::Custom(path) = &choice {
         if !path.is_file() {
-            let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            return Err(Problem::OverlayFileGone { file, path }.say());
+            return Err(Problem::OverlayFileGone { file: name_of(path), path }.say());
         }
     }
 
     let updated = {
         let mut settings = state.settings.lock().unwrap();
-        match orientation {
-            Orientation::Landscape => settings.overlay_landscape = choice,
-            Orientation::Portrait => settings.overlay_portrait = choice,
+        *settings.slot_mut(orientation) = choice;
+        settings.save(&app)?;
+        settings.clone()
+    };
+    push_overlays(&app, &state, &updated)?;
+
+    // The resolved path rather than the choice, because that is what the pipeline
+    // was actually handed and what a puzzled log reader needs to see.
+    let resolved = updated.slot(orientation).resolve(&app, orientation);
+    log::info!(
+        "{orientation:?} overlay is now {}",
+        resolved.map_or_else(|| "nothing".to_string(), |p| p.display().to_string())
+    );
+    overlays::announce(&app);
+    Ok(updated)
+}
+
+/// Pushes the overlay settings to the running child so the next photo uses them.
+///
+/// No sidecar yet just means the boot handshake has not happened, and that sends
+/// these settings anyway - so saving is the whole job in that case.
+fn push_overlays(app: &AppHandle, state: &State<AppState>, settings: &Settings) -> Result<(), String> {
+    let sidecar = state.sidecar.lock().unwrap().clone();
+    let Some(sidecar) = sidecar else { return Ok(()) };
+    let preview_dir = Index::preview_dir(app)?;
+    sidecar.reconfigure(settings.pipeline_config(app), &preview_dir.display().to_string())?;
+    Ok(())
+}
+
+/// The panel's cards, drawn or still being drawn.
+///
+/// The pull half of pull-then-subscribe, like `list_photos`: the renders may well
+/// have finished before the webview attached its listener, and events are not
+/// replayed.
+#[tauri::command]
+fn list_overlays(app: AppHandle, state: State<AppState>) -> Vec<OverlayCard> {
+    let settings = state.settings.lock().unwrap().clone();
+    overlays::cards(&app, &settings)
+}
+
+/// Adds an SVG the operator picked to the library.
+///
+/// Says so on a duplicate, where a drop stays quiet: this one cost a trip through
+/// a file dialog, and a pick that appeared to do nothing would read as a failure.
+///
+/// Adding does not switch anything on. The card arrives with both toggles dark and
+/// the operator lights the one they want - an add that took a slot would overwrite
+/// a choice they had already made.
+#[tauri::command]
+fn add_overlay(app: AppHandle, state: State<AppState>, path: PathBuf) -> Result<Settings, String> {
+    if !is_drawing(&path) || !path.is_file() {
+        return Err(Problem::OverlayNotADrawing { file: name_of(&path), path: &path }.say());
+    }
+
+    let updated = {
+        let mut settings = state.settings.lock().unwrap();
+        if !settings.add_overlay(Overlay::Custom(path.clone())) {
+            return Err(Problem::OverlayAlreadyAdded { file: name_of(&path) }.warn());
         }
         settings.save(&app)?;
         settings.clone()
     };
 
-    // Push it to the running child so the next photo uses it. No sidecar yet just
-    // means the boot handshake has not happened, and that sends these settings
-    // anyway - so saving is the whole job in that case.
-    let sidecar = state.sidecar.lock().unwrap().clone();
-    if let Some(sidecar) = sidecar {
-        let preview_dir = Index::preview_dir(&app)?;
-        sidecar.reconfigure(updated.pipeline_config(&app), &preview_dir.display().to_string())?;
-    }
-
-    // The resolved path rather than the choice, because that is what the pipeline
-    // was actually handed and what a puzzled log reader needs to see.
-    let resolved = match orientation {
-        Orientation::Landscape => updated.overlay_landscape.resolve(&app, orientation),
-        Orientation::Portrait => updated.overlay_portrait.resolve(&app, orientation),
-    };
-    log::info!(
-        "{orientation:?} overlay is now {}",
-        resolved.map_or_else(|| "nothing".to_string(), |p| p.display().to_string())
-    );
+    log::info!("added the overlay {}", path.display());
+    overlays::announce(&app);
+    overlays::refresh(app.clone());
     Ok(updated)
+}
+
+/// Takes an overlay out of the library, and out of any slot that was using it.
+///
+/// **Deletes nothing the operator can see.** The SVG is theirs and stays where it
+/// is - only snappr's own rendering of it is collected, on the next refresh. The
+/// sample cannot be removed at all; its card offers no Remove item, and
+/// `Settings::remove_overlay` refuses it as well.
+#[tauri::command]
+fn remove_overlay(app: AppHandle, state: State<AppState>, overlay: Overlay) -> Result<Settings, String> {
+    let updated = {
+        let mut settings = state.settings.lock().unwrap();
+        if !settings.remove_overlay(&overlay) {
+            // Nothing to do rather than a failure: the card is already gone, which
+            // is what the operator asked for.
+            return Ok(settings.clone());
+        }
+        settings.save(&app)?;
+        settings.clone()
+    };
+    // A removal can empty a slot, so the pipeline has to hear about it before the
+    // next photo - otherwise the child keeps compositing branding the panel no
+    // longer shows, which is the one thing the panel exists to prevent.
+    push_overlays(&app, &state, &updated)?;
+
+    log::info!("removed the overlay {}", overlay.label());
+    overlays::announce(&app);
+    overlays::refresh(app.clone());
+    Ok(updated)
+}
+
+/// Shows an overlay's SVG in Finder - the sample included, which is how the
+/// operator gets at the worked example to copy and start a real one from.
+///
+/// The sample is revealed in place rather than exported as a copy, which is worth
+/// knowing the shape of: in a built `.app` it sits in `Contents/Resources`, so
+/// Finder opens a package-contents view, the file is read-only, and an app run from
+/// a mounted DMG is on a read-only volume besides. Under `tauri dev` the target is
+/// the build script's copy in `target/debug/sample/`, and edits there are
+/// overwritten by the next build. Either way the operator copies it somewhere of
+/// their own first, which is the intended gesture - this is a "here is the file"
+/// item, not an "edit this" one. A card the operator added is their own file and
+/// has none of that.
+#[tauri::command]
+fn reveal_overlay(app: AppHandle, overlay: Overlay) -> Result<(), String> {
+    // Two different absences, and the operator can act on only one of them. A
+    // custom overlay whose file has moved is theirs to put back; a sample this
+    // build does not ship is not, so that one gets the generic sentence.
+    let Some(path) = overlay.resolve(&app, Orientation::Landscape) else {
+        return Err(Problem::FinderWontOpen { detail: format!("{} resolves to nothing", overlay.label()) }.say());
+    };
+    if !path.is_file() {
+        return Err(Problem::OverlayFileGone { file: name_of(&path), path: &path }.say());
+    }
+    reveal(&path)
+}
+
+/// Remembers whether the panel is a column of cards or a rail.
+///
+/// Persisted rather than kept in the webview: overlays are set up once and then
+/// left alone, and a kiosk that gave the photo back 180px on every launch would
+/// have to be collapsed again every morning.
+#[tauri::command]
+fn set_panel_collapsed(app: AppHandle, state: State<AppState>, collapsed: bool) -> Result<Settings, String> {
+    let mut settings = state.settings.lock().unwrap();
+    settings.overlays_collapsed = collapsed;
+    settings.save(&app)?;
+    Ok(settings.clone())
 }
 
 /// Pauses or resumes the folder watch. Dropping the watcher is what stops it. The
@@ -661,25 +834,6 @@ fn reveal_photo(state: State<AppState>, source: PathBuf) -> Result<(), String> {
     reveal(&destination)
 }
 
-/// Finder, with the shipped sample overlay selected, so it can be copied out and
-/// used as the starting point for a real one.
-///
-/// This reveals the original in place rather than exporting a copy, which is worth
-/// knowing the shape of: in a built `.app` the file sits in `Contents/Resources`,
-/// so Finder opens a package-contents view, the file is read-only, and an app run
-/// from a mounted DMG is on a read-only volume besides. Under `tauri dev` the
-/// target is the build script's copy in `target/debug/sample/`, and edits there are
-/// overwritten by the next build. Either way the operator copies it somewhere of
-/// their own first, which is the intended gesture - this is a "here is the file"
-/// button, not an "edit this" one.
-#[tauri::command]
-fn reveal_sample_overlay(app: AppHandle) -> Result<(), String> {
-    let path = Overlay::Sample.resolve(&app, Orientation::Landscape).ok_or_else(|| {
-        Problem::FinderWontOpen { detail: "this build ships no sample overlay".into() }.say()
-    })?;
-    reveal(&path)
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -725,6 +879,8 @@ pub fn run() {
             runtime: Mutex::new(RuntimeStatus::default()),
             watcher: Mutex::new(None),
             pending: Mutex::new(Vec::new()),
+            overlays: Mutex::new(overlays::Cache::new()),
+            drawing: Mutex::new(()),
         })
         .invoke_handler(tauri::generate_handler![
             list_photos,
@@ -734,6 +890,11 @@ pub fn run() {
             set_watch_dir,
             set_watching,
             set_overlay,
+            list_overlays,
+            add_overlay,
+            remove_overlay,
+            reveal_overlay,
+            set_panel_collapsed,
             reprocess,
             clear_photo,
             clear_all_photos,
@@ -741,7 +902,6 @@ pub fn run() {
             share_photo,
             print_photo,
             reveal_photo,
-            reveal_sample_overlay,
         ])
         // Files dropped on the window. Tauri owns drag-and-drop (dragDropEnabled is
         // on, the default), so the webview never sees the drop and cannot navigate
@@ -824,6 +984,12 @@ pub fn run() {
                                 notice: reset,
                             },
                         );
+
+                        // Draw the panel's cards. Last, and on its own thread: this
+                        // is the one thing here that queues behind photo work, and
+                        // a drop that arrived on the Dock icon has already been let
+                        // through above. The panel shows skeletons until they land.
+                        overlays::refresh(boot.clone());
                     }
                     Err(error) => {
                         set_runtime_status(

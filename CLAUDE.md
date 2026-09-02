@@ -168,13 +168,21 @@ clearing a cell from the filmstrip deletes nothing the operator can see.
 
 **The app's own support directories are snappr's to manage**, and it does create
 and delete inside them. `app_config_dir()` holds `settings.json`; `app_data_dir()`
-holds `index.json` and a `previews/` tree. Two writes there are worth knowing
-about, because both look like violations of the paragraph above and are not:
+holds `index.json`, a `previews/` tree and an `overlays/` one. Three writes there
+are worth knowing about, because all of them look like violations of the paragraph
+above and are not:
 
 - **The three preview JPEGs of a photo are deleted with it.** They exist only to
   be drawn in the window, so they are snappr's - and they are *all* that is
   snappr's. `Photo::owned_previews` in `src-tauri/src/photo.rs` is the list, and
   its comment draws the line against the source and the print explicitly.
+- **An overlay's card PNG is deleted when no overlay points at it.** Same line, and
+  it is worth stating out loud because the overlay panel is otherwise full of the
+  operator's own files: **the SVG is remembered by path and never copied, never
+  moved and never deleted**. Removing a card removes an entry from
+  `settings.json` and, on the next refresh, snappr's own rendering of it. The
+  design itself sits exactly where the operator put it. `src-tauri/src/overlays.rs`
+  is the whole of that.
 - **A `settings.json` that will not parse is renamed to `settings.json.broken`**
   before the defaults are used - the one rename anywhere in the codebase. That is
   not tidiness. The next `save()` would otherwise overwrite it, and the watch
@@ -353,14 +361,20 @@ problem that fsevents were buying.
 ## The overlay SVGs
 
 **snappr ships no branding, but it does ship one sample.** There are two overlay
-slots, one per orientation, and each is an **operator setting picked from the top
-bar**. Each is one of three things, all of them working configurations:
+slots, one per orientation, and each holds one of the overlays in the app's
+**overlay panel** - the operator's library of designs, down the left of the photo.
+Each slot is one of three things, all of them working configurations:
 
 | | what it composites |
 |---|---|
 | **Sample** | `sample/overlay-landscape.svg`, the one overlay in the bundle |
-| **Custom** | an SVG the operator picked from anywhere on disk |
+| **Custom** | an SVG the operator added from anywhere on disk |
 | **None** | nothing - the photo is cropped to the print ratio and left alone |
+
+The panel shows a card per overlay with a landscape and a portrait toggle, so one
+overlay can be live for both. **`None` is not a card**: an orientation with no card
+lit simply has no overlay. See "The overlay panel" in `docs/desktop-app.md` for how
+the cards work and why each one renders a picture.
 
 A fresh install is Sample for landscape and None for portrait. That asymmetry is
 deliberate: only a landscape sample is drawn, so a portrait Sample composites
@@ -419,7 +433,13 @@ Where the settings live and how they reach the pipeline:
   `src-tauri/src/settings.rs`, of type `Overlay`, persisted to
   `app_config_dir()/settings.json` next to `watch_dir`. **A custom path is
   remembered, not copied** - re-exporting a design over the same path takes effect
-  on the next photo with no re-picking.
+  on the next photo with no re-adding, and refreshes its card.
+- `Settings::overlays`, the library the panel shows, is a **separate key beside
+  those two rather than a new shape for them**. It is a `Vec<Overlay>`, so it
+  reuses the element `Deserialize` below that already reads every historic shape.
+  `Settings::normalise` derives the library an old file implies - the sample first,
+  plus whatever either slot already pointed at - so an install from before the
+  panel opens with its own overlay already in it and no migration code anywhere.
 - **`Overlay` never reaches Ruby.** `Overlay::resolve` turns it into a path or
   nothing on the Rust side, so `lib/snappr` still sees exactly what it always saw
   and needed no changes at all for the sample. It could not do the lookup itself
@@ -432,17 +452,21 @@ Where the settings live and how they reach the pipeline:
   side that decides overlays and should say so outright. **Keep the Ruby default
   nil**, or the two stop agreeing.
 - `set_overlay` pushes the change to the running child with `Sidecar::
-  reconfigure`, so no relaunch is needed. Photos already in the strip keep their
-  output; the per-photo retry button is how one gets regenerated.
+  reconfigure`, so no relaunch is needed - and it is **all** a card's toggles do.
+  A slot holds one value, so switching an overlay on is also what switches it off
+  wherever it was; there is no second command and no way for two cards to show lit
+  for one orientation. `remove_overlay` pushes too, because removing a card can
+  empty a slot. Photos already in the strip keep their output; the per-photo retry
+  button is how one gets regenerated.
 - **The slot is the only setting whose on-disk shape has ever changed**, and
   `Settings::load` answers any parse failure by discarding the whole file - so a
   field that cannot read its own history costs the operator their watch folder and
   printer, not just their overlay. `Overlay`'s hand-written `Deserialize` reads the
   legacy `null` (as Sample) and legacy path string (as Custom) as well as the
   tagged form, `#[serde(alias)]` reads the old key names, and the field names are
-  what get written back - so the file migrates itself on the first save. The six
-  tests in `settings.rs` are there for exactly this and are the only Rust tests in
-  the project.
+  what get written back - so the file migrates itself on the first save. The tests
+  in `settings.rs` are there for exactly this and are the only Rust tests in the
+  project.
 
 **Two folders of SVGs, and the distinction is load-bearing:**
 
@@ -483,9 +507,9 @@ around its window gets that margin in the background colour.
 Artwork may overlap the window freely - the overlay composites *over* the photo,
 so a logo or a soft edge across the photo works as drawn.
 
-To rebrand, pick different SVGs from the Overlays menu. Nothing in Ruby knows
-what they depict; Ruby owns exactly two numbers about layout, the paper's
-dimensions.
+To rebrand, add SVGs to the overlay panel and light the orientations you want.
+Nothing in Ruby knows what they depict; Ruby owns exactly two numbers about
+layout, the paper's dimensions.
 
 ### Finding the window by colour, not by geometry
 
@@ -661,6 +685,8 @@ THE PIPELINE (this document)
   lib/snappr/overlay_svg.rb renders an overlay at a pixel size, finds its #FF00FF window
   lib/snappr/overlay.rb     orientation, window fit, colour-managed composite, PNG save
   lib/snappr/preview.rb     the three display JPEGs - NEVER into the watched folder
+  lib/snappr/overlay_preview.rb  the overlay panel's card: the artwork, and where the
+                                 photo window landed. A check, not a decoration.
   lib/snappr/server.rb      the NDJSON sidecar protocol; stdout is frames, stderr is log
   lib/snappr/watcher.rb     drop folder via the listen gem, candidate? guard, stability check
   lib/snappr/cli.rb         subcommand dispatch (Snappr::CLI)
@@ -672,7 +698,9 @@ THE DESKTOP APP (docs/desktop-app.md)
   src-tauri/src/sidecar.rs  spawns Ruby, owns the wire protocol
   src-tauri/src/runtime.rs  dev vs bundle layout, the child's environment
   src-tauri/src/watcher.rs  the app's own watch; refusal() is the candidate rule
-  src-tauri/src/settings.rs settings.json, and the hand-written Overlay Deserialize
+  src-tauri/src/settings.rs settings.json, the hand-written Overlay Deserialize, and
+                            the overlay library the panel shows
+  src-tauri/src/overlays.rs the panel's cards and their PNGs - snappr's own files
   src-tauri/src/photo.rs    one record per photo, and the index that outlives the session
   src-tauri/src/mac.rs      the share sheet and the native print
   src-tauri/src/problem.rs  the shell's half of the catalogue, same two-version rule
