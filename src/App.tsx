@@ -116,7 +116,7 @@ export default function App() {
   // ` toggles overlayed against original. Lightroom's before/after key is \, but
   // ` is the one directly under the operator's left little finger without a
   // reach, which matters when the gesture is used dozens of times an hour.
-  // Arrows move along the strip, Tab does too, and Cmd+P prints as everywhere.
+  // Arrows move along the strip, Tab does nothing, and Cmd+P prints as everywhere.
   //
   // The filmstrip is a radiogroup and the view toggle a toggle group, and both own
   // the arrow keys for their own roving focus while they have it. Without the
@@ -128,14 +128,14 @@ export default function App() {
       const inWidget = target?.closest('[role="radiogroup"], [role="group"], input, textarea');
 
       if (event.key === "Tab") {
-        // Tab is the filmstrip's next/previous, and the browser's focus
-        // traversal is suppressed outright rather than left to walk the toolbar.
-        // There is no form here to tab through: every control is a single button
-        // the operator reaches with the mouse, and at an event the one thing
-        // worth having under a thumb key is the next photo. Unguarded, because
-        // this has to hold wherever focus happens to be sitting.
+        // Tab is swallowed and does nothing at all. The branch exists purely to
+        // suppress the browser's focus traversal rather than leave it to walk the
+        // toolbar: there is no form here to tab through, every control is a single
+        // button the operator reaches with the mouse, and the arrows are the
+        // strip's navigation. Do not delete it as an empty branch - without the
+        // preventDefault the focus ring is back. Unguarded, because this has to
+        // hold wherever focus happens to be sitting.
         event.preventDefault();
-        step(event.shiftKey ? -1 : 1);
       } else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
         if (inWidget) return;
         event.preventDefault();

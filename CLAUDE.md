@@ -76,18 +76,19 @@ Two things that look like they could be simplified and cannot:
 
 | Key | Does |
 |---|---|
-| `Tab` / `Shift+Tab` | next / previous thumb |
 | `Left` / `Right` | next / previous thumb |
 | `` ` `` | toggle overlayed against original |
 | `Cmd+P` | print |
 
-**Tab does not move focus, anywhere in the app.** The handler calls
-`preventDefault` on it unconditionally, so the browser's focus traversal is
+**Tab does nothing, anywhere in the app.** The handler calls `preventDefault` on
+it unconditionally and steps nothing, so the browser's focus traversal is
 suppressed outright rather than left to walk the toolbar. This is deliberate:
-there is no form here to tab through, every control is a single button reached
-with the mouse, and at an event the one thing worth having under a thumb key is
-the next photo. Do not "restore accessibility" by deleting it - the filmstrip is
-a radiogroup and is still fully operable from the keyboard.
+there is no form here to tab through, and every control is a single button
+reached with the mouse. The arrows are the strip's navigation - Tab used to be a
+second next/previous and no longer is, which is why the branch looks empty apart
+from the `preventDefault`. Do not delete it as dead code, and do not "restore
+accessibility" by deleting it either - the filmstrip is a radiogroup and is still
+fully operable from the keyboard.
 
 `` ` `` rather than Lightroom's `\` for the before/after toggle: it is under the
 left little finger without a reach, and the gesture gets used dozens of times an
