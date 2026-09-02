@@ -22,6 +22,10 @@ module Snappr
     # this is insurance rather than a fix, bought for 0.1% of the photo's width.
     SEAM_MARGIN = 2
 
+    # The window used when an orientation has no overlay: the whole frame, in the
+    # same fractions-of-the-frame form OverlaySvg.photo_window returns.
+    FULL_FRAME = { x: 0.0, y: 0.0, width: 1.0, height: 1.0 }.freeze
+
     def initialize(config = Snappr.config)
       @config = config
     end
@@ -48,9 +52,14 @@ module Snappr
       image = load(source)
       exif = Exif.read(image)
       orientation = orientation_of(image.width, image.height)
-      svg = @config.overlay_svg(orientation)
-      Snappr.logger.info "#{name}: #{image.width}x#{image.height}, #{orientation} - using #{File.basename(svg)}"
-      warn_on_aspect_mismatch(svg, orientation, warnings)
+      # nil is a legitimate answer: the operator can clear either orientation's
+      # slot, and a cleared slot prints the crop with nothing composited over it.
+      svg = @config.overlay_svg(orientation, warnings)
+      Snappr.logger.info format(
+        "%s: %dx%d, %s - %s", name, image.width, image.height, orientation,
+        svg ? "using #{File.basename(svg)}" : "no overlay, printing the crop"
+      )
+      warn_on_aspect_mismatch(svg, orientation, warnings) if svg
 
       layout = layout_for(image, svg, orientation)
       Snappr.logger.info format(
@@ -58,24 +67,32 @@ module Snappr
         name, layout[:photo_width], layout[:photo_height], layout[:crop_left], layout[:crop_top],
         layout[:canvas_width], layout[:canvas_height]
       )
-      overlay = overlay_for(image, svg, layout[:canvas_width], layout[:canvas_height], warnings)
+      overlay = overlay_for(image, svg, layout[:canvas_width], layout[:canvas_height], warnings) if svg
       background = background_for(image)
 
       destination = destination_for(source)
       temp = temp_path_for(source)
-      Snappr.logger.info "#{name}: compositing the overlay and writing #{destination.basename}"
+      Snappr.logger.info "#{name}: writing #{destination.basename}"
       begin
-        ImageProcessing::Vips
+        pipeline = ImageProcessing::Vips
           .source(source.to_s)
           # object-fit: cover, with nothing to scale - see layout_for.
           .crop(layout[:crop_left], layout[:crop_top], layout[:photo_width], layout[:photo_height])
-          # Drop the photo onto the full canvas at the window's position.
+          # Drop the photo onto the full canvas at the window's position. With no
+          # overlay the canvas is the crop and the position is (0, 0), so this is
+          # a no-op - left unconditional because it costs nothing and one chain
+          # shape is easier to follow than two.
           .embed(layout[:photo_left], layout[:photo_top],
                  layout[:canvas_width], layout[:canvas_height],
                  extend: :background, background: background)
-          .composite(overlay, mode: "over", gravity: "north-west")
-          # The canvas is opaque, so this only drops a redundant alpha channel.
-          .flatten(background: background)
+        pipeline = pipeline.composite(overlay, mode: "over", gravity: "north-west") if overlay
+        # The canvas is opaque, so this only drops a redundant alpha channel.
+        # Conditional because vips flatten is NOT a no-op on an image that has no
+        # alpha to drop: it fails with "linear: vector must have 1 or 2 elements",
+        # which points nowhere near the cause. Alpha is here only if the overlay
+        # brought it or the source carried it, so ask about exactly that.
+        pipeline = pipeline.flatten(background: background) if overlay || image.has_alpha?
+        pipeline
           .convert("png")
           .saver(compression: @config.png_compression)
           .call(destination: temp.to_s)
@@ -129,8 +146,12 @@ module Snappr
     # comes out at exactly the size of the largest crop the photo can supply at
     # the window's shape. That makes the fit a pure centre crop - object-fit:
     # cover with a scale factor of 1 - and keeps the photo bit-for-bit intact.
+    # A nil svg means no overlay: the window is the whole frame and there is no
+    # seam to hide, so this comes out as a plain centre crop to the print ratio
+    # with the canvas equal to the crop. Nothing special-cases it further down.
     def layout_for(image, svg, orientation)
-      window = OverlaySvg.photo_window(svg)
+      window = svg ? OverlaySvg.photo_window(svg) : FULL_FRAME
+      margin = svg ? SEAM_MARGIN : 0
       # The window's shape in output pixels depends on the canvas shape, which is
       # the paper's ratio.
       window_ratio = (window[:width] / window[:height]) * @config.print_ratio(orientation)
@@ -138,8 +159,8 @@ module Snappr
 
       # Hold back the seam margin before deriving the canvas, so growing the
       # photo by it later can never ask for more pixels than the photo has.
-      canvas_width = ((crop[:width] - 2 * SEAM_MARGIN) / window[:width]).floor
-      canvas_height = ((crop[:height] - 2 * SEAM_MARGIN) / window[:height]).floor
+      canvas_width = ((crop[:width] - 2 * margin) / window[:width]).floor
+      canvas_height = ((crop[:height] - 2 * margin) / window[:height]).floor
 
       left = (window[:x] * canvas_width).round
       top = (window[:y] * canvas_height).round
@@ -147,8 +168,8 @@ module Snappr
       bottom = top + (window[:height] * canvas_height).round
 
       # Grow by the seam margin, clamped to the canvas.
-      left, top = [left - SEAM_MARGIN, 0].max, [top - SEAM_MARGIN, 0].max
-      right, bottom = [right + SEAM_MARGIN, canvas_width].min, [bottom + SEAM_MARGIN, canvas_height].min
+      left, top = [left - margin, 0].max, [top - margin, 0].max
+      right, bottom = [right + margin, canvas_width].min, [bottom + margin, canvas_height].min
       photo_width, photo_height = right - left, bottom - top
 
       { canvas_width: canvas_width, canvas_height: canvas_height,

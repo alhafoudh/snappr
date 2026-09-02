@@ -71,6 +71,19 @@ pub struct Settings {
     /// The bar's watch toggle. Persisted so a kiosk comes back the way it was
     /// left; the toggle always shows which, so there is no hidden state.
     pub watch_enabled: bool,
+    /// The branding, one SVG per orientation, picked by the operator from the bar.
+    ///
+    /// `None` is a legitimate setting and the default of a fresh install: that
+    /// orientation prints the crop with nothing composited over it. snappr ships
+    /// no branding of its own - the files under `share/` are test material and
+    /// must never be listed in `bundle.resources`.
+    ///
+    /// The path is remembered rather than the file copied, so re-exporting a
+    /// design over the same path takes effect on the next photo with no
+    /// re-picking. A path that later goes missing degrades to no overlay with a
+    /// warning on the photo; see `Config#overlay_svg` on the Ruby side.
+    pub overlay_svg_landscape: Option<PathBuf>,
+    pub overlay_svg_portrait: Option<PathBuf>,
     pub extensions: Vec<String>,
     /// Dual-purpose: it names the output file *and* is the watcher's self-output
     /// guard, so it has to match what the Ruby side appends.
@@ -99,6 +112,8 @@ impl Default for Settings {
         Self {
             watch_dir: default_watch_dir(),
             watch_enabled: true,
+            overlay_svg_landscape: None,
+            overlay_svg_portrait: None,
             extensions: default_extensions(),
             output_suffix: default_output_suffix(),
             background: default_background(),
@@ -152,12 +167,20 @@ impl Settings {
         std::fs::write(&path, raw).map_err(|e| format!("cannot write {}: {e}", path.display()))
     }
 
-    /// The seven keys the pipeline actually reads. Deliberately not the whole
-    /// struct: the watch settings belong to this side now, and sending them would
-    /// only create a second place for them to drift.
+    /// The keys the pipeline actually reads. Deliberately not the whole struct:
+    /// the watch settings belong to this side now, and sending them would only
+    /// create a second place for them to drift.
+    ///
+    /// A cleared overlay travels as an explicit `null` rather than an absent key,
+    /// because `Server#hello` merges this over `Config::DEFAULTS` - omitting the
+    /// key would let a default win, and the default is what we are overriding.
     pub fn pipeline_config(&self) -> Value {
         json!({
             "print": { "short_mm": self.print_short_mm, "long_mm": self.print_long_mm },
+            "overlay_svg": {
+                "landscape": self.overlay_svg_landscape,
+                "portrait": self.overlay_svg_portrait,
+            },
             "output_suffix": self.output_suffix,
             "background": self.background,
             "png_compression": self.png_compression,

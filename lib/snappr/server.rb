@@ -18,7 +18,8 @@ module Snappr
   # Frames in:
   #   {"id":1,"cmd":"hello","config":{...},"preview_dir":"/..."}
   #   {"id":2,"cmd":"overlay","source":"/Users/.../IMG_1234.heic"}
-  #   {"id":3,"cmd":"ping"}
+  #   {"id":3,"cmd":"configure","config":{...},"preview_dir":"/..."}
+  #   {"id":4,"cmd":"ping"}
   #
   # Frames out:
   #   {"id":1,"ok":true,"ruby":"3.4.5","vips":"8.18.4"}
@@ -61,7 +62,10 @@ module Snappr
 
       id = request["id"]
       case request["cmd"]
-      when "hello" then hello(id, request)
+      # Same handler as hello, on purpose: it rebuilds Config, Overlay and Preview
+      # from scratch, so re-running it is how a running sidecar takes new settings
+      # without being restarted. A second name only so the logs stay readable.
+      when "hello", "configure" then hello(id, request)
       when "overlay" then overlay(id, request)
       when "ping" then emit(id: id, ok: true, pong: true)
       else
@@ -111,6 +115,10 @@ module Snappr
       config.preview_max_px
       config.preview_thumb_px
       config.preview_quality
+      # Only that the paths are resolvable, deliberately not that the files exist.
+      # An empty slot is a legitimate setting, and a slot whose file has been moved
+      # degrades to no overlay with a warning at process time - failing the
+      # handshake over either would mean an app that will not launch.
       Config::ORIENTATIONS.each { |orientation| config.configured_overlay_svg(orientation) }
     end
 

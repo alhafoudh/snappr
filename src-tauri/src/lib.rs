@@ -222,6 +222,63 @@ fn set_watch_dir(app: AppHandle, state: State<AppState>, dir: PathBuf) -> Result
     Ok(updated)
 }
 
+/// Picks the overlay for one orientation, or clears it with `None`.
+///
+/// A cleared slot is not a broken one: that orientation prints the crop with
+/// nothing composited over it, which is also what a fresh install does. snappr
+/// ships no branding, so this is the only way any gets in.
+///
+/// Only that the file exists is checked. An SVG with no #FF00FF window, or one
+/// drawn at the wrong shape, comes back as a warning on the photo itself - which
+/// the filmstrip and the Actions bar already show - rather than as a rejected
+/// pick, because that is where the operator can see it against the result.
+///
+/// Photos already in the strip keep their output. Regenerating one is what the
+/// retry button is for; silently rewriting a strip's worth of 10-25 MB PNGs
+/// because a menu item was clicked is not worth the surprise.
+#[tauri::command]
+fn set_overlay_svg(
+    app: AppHandle,
+    state: State<AppState>,
+    orientation: String,
+    path: Option<PathBuf>,
+) -> Result<Settings, String> {
+    if !matches!(orientation.as_str(), "landscape" | "portrait") {
+        return Err(format!("unknown orientation: {orientation}"));
+    }
+    if let Some(path) = &path {
+        if !path.is_file() {
+            return Err(format!("{} is not a file", path.display()));
+        }
+    }
+    let chosen = path
+        .as_ref()
+        .map_or_else(|| "none".to_string(), |p| p.display().to_string());
+
+    let updated = {
+        let mut settings = state.settings.lock().unwrap();
+        if orientation == "landscape" {
+            settings.overlay_svg_landscape = path;
+        } else {
+            settings.overlay_svg_portrait = path;
+        }
+        settings.save(&app)?;
+        settings.clone()
+    };
+
+    // Push it to the running child so the next photo uses it. No sidecar yet just
+    // means the boot handshake has not happened, and that sends these settings
+    // anyway - so saving is the whole job in that case.
+    let sidecar = state.sidecar.lock().unwrap().clone();
+    if let Some(sidecar) = sidecar {
+        let preview_dir = Index::preview_dir(&app)?;
+        sidecar.reconfigure(updated.pipeline_config(), &preview_dir.display().to_string())?;
+    }
+
+    log::info!("{orientation} overlay is now {chosen}");
+    Ok(updated)
+}
+
 /// Pauses or resumes the folder watch. Dropping the watcher is what stops it. The
 /// choice is persisted, so a kiosk comes back the way it was left; the toggle in
 /// the bar always shows which.
@@ -421,6 +478,7 @@ pub fn run() {
             get_settings,
             set_watch_dir,
             set_watching,
+            set_overlay_svg,
             reprocess,
             clear_photo,
             clear_all_photos,

@@ -50,6 +50,13 @@ export interface Photo {
 export interface Settings {
   watch_dir: string;
   watch_enabled: boolean;
+  /**
+   * The branding, one SVG per orientation. `null` is a real setting and the
+   * default of a fresh install: that orientation prints the crop with nothing
+   * composited over it. snappr ships no branding of its own.
+   */
+  overlay_svg_landscape: string | null;
+  overlay_svg_portrait: string | null;
   extensions: string[];
   output_suffix: string;
   background: string;
@@ -73,3 +80,6 @@ export interface RuntimeStatus {
 
 /** Which side of the overlayed/original toggle is showing. */
 export type View = "overlay" | "source";
+
+/** The two overlay slots, which are also the two crop shapes. */
+export type Orientation = "landscape" | "portrait";

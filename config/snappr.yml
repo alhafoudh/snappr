@@ -14,7 +14,14 @@ print:
 
 # One overlay per orientation. Each must contain a #FF00FF rectangle marking
 # where the photo goes; it is used for position and shape only and is never
-# rendered. Everything else in the file is the branding.
+# rendered. Everything else in the file is the branding. Either may be null,
+# which means no overlay: the photo is still cropped to the print ratio but
+# nothing is composited over it.
+#
+# This file is the CLI's config and nothing else reads it - the desktop app never
+# calls Config.load, it sends its own settings through the sidecar handshake, and
+# its overlays are picked by the operator and default to none. So the paths below
+# are the dev and testing loop, and share/ is test material, not shipped branding.
 overlay_svg:
   landscape: share/overlay-landscape.svg
   portrait: share/overlay-portrait.svg

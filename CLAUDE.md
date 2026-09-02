@@ -97,6 +97,17 @@ hour.
 `ContextMenu`. This is a macOS-only app and the OS gets placement, keyboard
 handling and dismissal right for nothing.
 
+**The Overlays button is one button, not two**, and it opens a native menu with a
+submenu per orientation ("Choose..." / "Clear"). The bar is 44px and already
+carries the watch toggle, the folder, the count and the view control; two more
+path buttons in it read as clutter, and the submenu labels can carry the current
+filename, which two buttons could not. It goes through the same `popup()` helper
+in `App.tsx` as the filmstrip menus, so the keep-one-menu-alive lifetime that
+comment describes applies here too. When both slots are empty the button says
+"No overlays" in gray - a fresh install has no branding, and that state has to
+look deliberate rather than unloaded. See "The overlay SVGs" for what clearing
+means and how the setting reaches the pipeline.
+
 **The info line under the photo is one truncating `Text`, and every group in it
 drops out when the source has nothing for it.** `Info` in `Actions.tsx` reads
 camera, lens and exposure from `photo.exif`, so a screenshot or a scan gives
@@ -168,17 +179,19 @@ once.
       |  Exif.read(image)                    -> camera, lens, exposure, taken_at
       |  orientation_of(width, height)       -> :landscape | :portrait
       |  crop_dimensions(w, h, print_ratio)  -> largest inscribed 148:100 or 100:148
-      |  OverlaySvg.render(overlay-<orientation>.svg, crop_w, crop_h)
+      |  config.overlay_svg(orientation)     -> the operator's SVG, or nil
+      |  OverlaySvg.render(svg, crop_w, crop_h)
       |
       |  OverlaySvg.photo_window(svg)         -> the #FF00FF window, as fractions
+      |                                          (FULL_FRAME when there is no SVG)
       |  layout_for(...)                      -> canvas size, crop, placement
       |  icc_transform the overlay into the photo's colour space
       |
       |  ImageProcessing::Vips
       |    .crop(left, top, photo_w, photo_h)          object-fit: cover, no scaling
       |    .embed(photo_left, photo_top, canvas_w, canvas_h, background)
-      |    .composite(overlay, over, north-west)
-      |    .flatten                                    drop the redundant alpha
+      |    .composite(overlay, over, north-west)       only when there is an overlay
+      |    .flatten                                    only when there is alpha to drop
       |    .convert(png).saver(compression: 6)
       v
 ~/Downloads/IMG_1234.tmp-<pid>.overlay.png   (renamed into place)
@@ -354,17 +367,58 @@ problem that fsevents were buying.
 
 ## The overlay SVGs
 
-There are two, picked by the photo's orientation:
+**snappr ships no branding.** There are two overlay slots, one per orientation,
+and both are **operator settings picked from the top bar** - not assets this repo
+provides. A fresh install has neither, and that is a working configuration, not a
+broken one.
 
-| | frame | drawn at | branding |
-|---|---|---|---|
-| `share/overlay-landscape.svg` | 148x100mm | 2960x2000 | right **2/5** |
-| `share/overlay-portrait.svg` | 100x148mm | 2000x2960 | bottom **2/5** |
+| | frame | branding |
+|---|---|---|
+| landscape slot | 148x100mm | right **2/5** by convention |
+| portrait slot | 100x148mm | bottom **2/5** by convention |
 
-Both give the branding 2/5 of the frame and the photo 3/5, splitting along the
-frame's **long axis** - which is why portrait is a bottom band rather than a
-right-hand strip: 2/5 of a 100mm width is only about 40mm, and artwork shrinks
-badly in it.
+Giving the branding 2/5 of the frame and the photo 3/5 splits along the frame's
+**long axis**, which is why portrait wants a bottom band rather than a right-hand
+strip: 2/5 of a 100mm width is only about 40mm, and artwork shrinks badly in it.
+That is design advice for whoever draws one, not something Ruby knows.
+
+**An empty slot means no overlay at all.** The photo is still cropped to the
+print ratio, but nothing is composited over it: `Overlay::FULL_FRAME` stands in
+for the window, so the canvas comes out equal to the crop, the photo lands at
+(0, 0), and the seam margin is 0. The output is then bit-identical to the source
+across the *whole* frame rather than only where the overlay is clear -
+`overlay_test.rb` asserts exactly that.
+
+One trap in that path: **`flatten` is not a no-op on an image with no alpha.** It
+fails with `linear: vector must have 1 or 2 elements`, which points nowhere near
+the cause. Alpha is present only if the overlay brought it or the source carried
+it, so `Overlay#process` asks about precisely that before flattening.
+
+**A slot whose file has been moved degrades to no overlay with a warning**, and
+does not raise. The warning travels in the result's `warnings` array, so the cell
+and the Actions bar both show it. There is deliberately **no fallback to the
+other orientation's SVG** - that existed while the overlays were committed assets
+that might ship only one orientation, and now that each slot is picked separately
+it would mean clearing portrait silently printed stretched landscape branding.
+Wrong branding on a print is worse than none.
+
+Where the settings live and how they reach the pipeline:
+
+- `Settings::overlay_svg_landscape` / `_portrait` in `src-tauri/src/settings.rs`,
+  `Option<PathBuf>`, persisted to `app_config_dir()/settings.json` next to
+  `watch_dir`. **The path is remembered, not the file copied** - re-exporting a
+  design over the same path takes effect on the next photo with no re-picking.
+- `pipeline_config()` emits them as `overlay_svg: { landscape, portrait }`, with
+  an explicit `null` for a cleared slot. It has to be explicit: `Server#hello`
+  merges the frame over `Config::DEFAULTS`, so an absent key would let a default
+  win, and the default is the thing being overridden.
+- `set_overlay_svg` pushes the change to the running child with `Sidecar::
+  reconfigure`, so no relaunch is needed. Photos already in the strip keep their
+  output; the per-photo retry button is how one gets regenerated.
+
+**`share/` is test material, not branding**, and must never be listed in
+`bundle.resources`. `config/snappr.yml` still points at it because that file is
+the CLI's config and nothing else reads it - the app never calls `Config.load`.
 
 **Draw them in whatever tool you like.** Figma, Illustrator and Inkscape exports
 all work unmodified. There are three rules:
@@ -377,8 +431,8 @@ all work unmodified. There are three rules:
 2. **Draw at the paper's aspect ratio** - 1.48:1 for landscape, 1:1.48 for
    portrait. The overlay is stretched to fill the frame, so one drawn at the wrong
    shape is silently distorted. `Overlay#warn_on_aspect_mismatch` logs a warning
-   naming the size to redraw at, and `overlay_svg_test.rb` asserts both committed
-   files are within 1% of their print ratio.
+   naming the size to redraw at, and `overlay_svg_test.rb` asserts the files in
+   `share/` are within 1% of their print ratio.
 3. **Keep a `viewBox`**, or a `width` and `height` in absolute units. That is what
    `OverlaySvg` scales. Exporters emit one by default.
 
@@ -389,8 +443,9 @@ around its window gets that margin in the background colour.
 Artwork may overlap the window freely - the overlay composites *over* the photo,
 so a logo or a soft edge across the photo works as drawn.
 
-To rebrand, replace the SVGs. Nothing in Ruby knows what they depict; Ruby owns
-exactly two numbers about layout, the paper's dimensions in `config/snappr.yml`.
+To rebrand, pick different SVGs from the Overlays menu. Nothing in Ruby knows
+what they depict; Ruby owns exactly two numbers about layout, the paper's
+dimensions.
 
 ### Finding the window by colour, not by geometry
 
@@ -544,8 +599,8 @@ lib/snappr/overlay_svg.rb renders an overlay at a pixel size, finds its #FF00FF 
 lib/snappr/overlay.rb     orientation, window fit, colour-managed composite, PNG save
 lib/snappr/watcher.rb     drop folder via the listen gem, candidate? guard, stability check
 lib/snappr/cli.rb         subcommand dispatch (Snappr::CLI)
-share/overlay-landscape.svg  the branding for 148x100mm prints
-share/overlay-portrait.svg   the branding for 100x148mm prints
+share/                       sample overlays for the CLI and for testing - NOT
+                             shipped branding, and never in bundle.resources
 test/fixtures/               the same design in several SVG dialects
 config/snappr.yml
 mise.toml

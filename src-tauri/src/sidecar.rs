@@ -112,6 +112,21 @@ impl Sidecar {
         self.request(json!({ "cmd": "overlay", "source": source }))
     }
 
+    /// Hands a running child new settings, so changing an overlay does not mean
+    /// restarting Ruby. `configure` is the same handler as `hello` on the other
+    /// side, which rebuilds Config, Overlay and Preview from scratch.
+    ///
+    /// Needs no locking of its own: the child handles one frame at a time, so
+    /// this simply queues behind any photo already in flight - the same property
+    /// the module comment above relies on for deduplication.
+    pub fn reconfigure(&self, config: Value, preview_dir: &str) -> Result<Value, String> {
+        self.request(json!({
+            "cmd": "configure",
+            "config": config,
+            "preview_dir": preview_dir,
+        }))
+    }
+
     /// Sends one frame and blocks until its response arrives. Callers run this off
     /// the main thread; the UI is driven by events, not by waiting on this.
     fn request(&self, mut frame: Value) -> Result<Value, String> {

@@ -9,10 +9,11 @@ module Snappr
       "watch_dir" => "~/Downloads",
       "extensions" => %w[heic heif jpg jpeg],
       "print" => { "short_mm" => 100, "long_mm" => 148 },
-      "overlay_svg" => {
-        "landscape" => "share/overlay-landscape.svg",
-        "portrait" => "share/overlay-portrait.svg"
-      },
+      # No branding by default. The overlays are an operator setting picked in the
+      # app, not an asset this project ships - see #overlay_svg. `share/` holds
+      # test material only, which is why config/snappr.yml (the CLI's config, not
+      # the app's) is the one place that still names those files.
+      "overlay_svg" => { "landscape" => nil, "portrait" => nil },
       "output_suffix" => ".overlay.png",
       "png_compression" => 6,
       "background" => "#ffffff",
@@ -36,27 +37,39 @@ module Snappr
 
     ORIENTATIONS = %i[landscape portrait].freeze
 
-    # The branding may ship only one orientation. A stretched overlay still
-    # warns and prints, a missing one prints nothing - so fall back to the other
-    # orientation's SVG, and error out only when neither file exists.
-    def overlay_svg(orientation)
+    # The overlay to composite for an orientation, or nil for none.
+    #
+    # nil is a legitimate configuration, not a failure: the operator can clear
+    # either slot, and a cleared slot prints the crop with no branding over it.
+    #
+    # A slot that is set but whose file has gone warns and degrades to nil for the
+    # same reason. Someone moves a branding folder mid-event; a kiosk that keeps
+    # printing plain photos is recoverable, one that errors on every photo is not.
+    # The warning reaches the filmstrip, so it is not silent.
+    #
+    # There is deliberately no fall back to the other orientation's SVG. That
+    # existed while the overlays were committed assets that "may ship only one
+    # orientation"; now that each slot is picked explicitly, clearing portrait has
+    # to mean no portrait overlay rather than a stretched landscape one.
+    def overlay_svg(orientation, warnings = nil)
       wanted = configured_overlay_svg(orientation)
+      return nil if wanted.nil?
       return wanted if wanted.file?
 
-      other = (ORIENTATIONS - [orientation.to_sym]).first
-      fallback = configured_overlay_svg(other)
-      raise Error, "no overlay SVG found: neither #{wanted} nor #{fallback} exists" unless fallback.file?
-
-      Snappr.logger.warn "#{wanted} is missing, using the #{other} overlay #{File.basename(fallback)} instead"
-      fallback
+      message = "#{wanted} is missing - printing #{orientation} photos with no overlay until it is picked again"
+      Snappr.logger.warn message
+      warnings&.push({ kind: "overlay_missing", message: message })
+      nil
     end
 
-    # The configured path for an orientation, whether or not the file exists.
+    # The configured path for an orientation, whether or not the file exists, or
+    # nil when the slot is empty.
     def configured_overlay_svg(orientation)
       orientation = orientation.to_sym
       raise Error, "unknown orientation: #{orientation}" unless ORIENTATIONS.include?(orientation)
 
-      resolve(@data.fetch("overlay_svg").fetch(orientation.to_s))
+      path = @data.fetch("overlay_svg", {})[orientation.to_s]
+      path.to_s.empty? ? nil : resolve(path)
     end
 
     def print_short_mm = Float(@data.dig("print", "short_mm"))

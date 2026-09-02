@@ -184,4 +184,57 @@ class ServerTest < Minitest::Test
     assert_equal true, done["ok"]
     assert_equal ["aspect_mismatch"], done["warnings"].map { |w| w["kind"] }
   end
+
+  # No branding is the default of a fresh install, so the handshake has to accept
+  # empty slots rather than treating them as a misconfiguration.
+  def test_a_handshake_with_no_overlays_succeeds_and_prints_the_crop
+    source = write_fixture(@dir, "IMG_5.jpg", 2400, 1600)
+    frame = hello_frame("overlay_svg" => { "landscape" => nil, "portrait" => nil })
+    responses, = converse(frame, { id: 2, cmd: "overlay", source: source.to_s })
+    done = responses[2]
+
+    assert_equal true, responses[0]["ok"]
+    assert_equal true, done["ok"]
+    assert_nil done["svg"]
+    # 2400x1600 is wider than 1.48:1, so the crop keeps the height and shortens
+    # the width - the largest inscribed rectangle, with nothing resampled.
+    assert_equal [2368, 1600], [done["output_width"], done["output_height"]]
+  end
+
+  # How the shell changes the overlays without restarting the sidecar. The same
+  # handler as hello, because it rebuilds Config, Overlay and Preview from
+  # scratch; this asserts that the next photo actually uses the new settings.
+  def test_configure_swaps_the_overlay_mid_session
+    source = write_fixture(@dir, "IMG_6.jpg", 2400, 1600)
+    responses, = converse(
+      hello_frame("overlay_svg" => { "landscape" => nil, "portrait" => nil }),
+      { id: 2, cmd: "overlay", source: source.to_s },
+      { id: 3, cmd: "configure", preview_dir: @previews,
+        config: { "overlay_svg" => { "landscape" => fixture("window-landscape.svg").to_s,
+                                     "portrait" => fixture("window-portrait.svg").to_s } } },
+      { id: 4, cmd: "overlay", source: source.to_s }
+    )
+
+    before, configured, after = responses[2], responses[3], responses[5]
+    assert_nil before["svg"]
+    assert_equal true, configured["ok"]
+    assert_equal fixture("window-landscape.svg"), after["svg"]
+    refute_equal before["output_width"], after["output_width"],
+                 "the new overlay's window should change the canvas the photo lands on"
+  end
+
+  # A slot whose file has been moved must not fail the handshake: an app that
+  # will not launch because an SVG was tidied away is worse than one that prints
+  # unbranded photos and says so.
+  def test_a_missing_overlay_file_does_not_fail_the_handshake
+    source = write_fixture(@dir, "IMG_7.jpg", 2400, 1600)
+    frame = hello_frame("overlay_svg" => { "landscape" => fixture("gone.svg").to_s, "portrait" => nil })
+    responses, = converse(frame, { id: 2, cmd: "overlay", source: source.to_s })
+    done = responses[2]
+
+    assert_equal true, responses[0]["ok"]
+    assert_equal true, done["ok"]
+    assert_nil done["svg"]
+    assert_equal ["overlay_missing"], done["warnings"].map { |w| w["kind"] }
+  end
 end

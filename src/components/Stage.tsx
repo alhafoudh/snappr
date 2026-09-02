@@ -3,7 +3,7 @@ import { ExclamationTriangleIcon, ImageIcon } from "@radix-ui/react-icons";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
 import type { Photo, RuntimeStatus, Settings, View } from "../types";
-import { folderName } from "./Toolbar";
+import { baseName } from "./Toolbar";
 
 /**
  * Letterboxed, and the box must have a definite size for that to work.
@@ -86,7 +86,7 @@ export function Stage({
         <Text color="gray" align="center" style={{ maxWidth: "52ch" }}>
           {settings?.watch_enabled === false
             ? "Watching is paused. Drop a photo here to overlay it."
-            : `AirDrop a photo to ${settings ? folderName(settings.watch_dir) : "the watched folder"}, or drop one here, to get started.`}
+            : `AirDrop a photo to ${settings ? baseName(settings.watch_dir) : "the watched folder"}, or drop one here, to get started.`}
         </Text>
       );
     }

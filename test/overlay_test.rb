@@ -106,9 +106,11 @@ class OverlayTest < Minitest::Test
     end
   end
 
-  # Same guarantee against the real committed branding, whatever it depicts.
+  # Same guarantee against a real, full-sized overlay rather than a fixture -
+  # whatever it depicts. share/ is sample material, not shipped branding, so this
+  # goes through the CLI's config to find it.
   def test_photo_is_untouched_with_the_committed_overlays
-    config = Snappr.config
+    config = committed_config
     overlay = Snappr::Overlay.new(config)
     in_tmpdir do |dir|
       noise = Vips::Image.gaussnoise(2400, 1800, mean: 128, sigma: 55).cast(:uchar)
@@ -315,7 +317,83 @@ class OverlayTest < Minitest::Test
     assert_match(/no such file/, error.message)
   end
 
+  # --- no overlay ---
+  #
+  # A cleared slot is a legitimate setting and the default of a fresh install, so
+  # the plain-crop path gets the same scrutiny as the branded one. The window is
+  # the whole frame and there is no seam to hide, so the output is exactly the
+  # largest inscribed crop at the print ratio - and the "photo is untouched"
+  # invariant holds across all of it rather than only where the overlay is clear.
+
+  def test_with_no_overlay_the_output_is_the_crop_at_the_print_ratio
+    overlay = Snappr::Overlay.new(bare_config)
+    in_tmpdir do |dir|
+      landscape = load_image(overlay.call(write_fixture(dir, "wide.png", 4032, 3024)))
+      assert_equal [4032, 2724], [landscape.width, landscape.height]
+
+      portrait = load_image(overlay.call(write_fixture(dir, "tall.png", 3024, 4032)))
+      assert_equal [2724, 4032], [portrait.width, portrait.height]
+    end
+  end
+
+  def test_with_no_overlay_the_canvas_is_the_crop_with_no_seam_margin
+    config = bare_config
+    overlay = Snappr::Overlay.new(config)
+    layout = overlay.layout_for(stub_image(4032, 3024), nil, :landscape)
+
+    assert_equal overlay.crop_dimensions(4032, 3024, config.print_ratio(:landscape)),
+                 [layout[:canvas_width], layout[:canvas_height]]
+    assert_equal [0, 0], [layout[:photo_left], layout[:photo_top]]
+    assert_equal [layout[:canvas_width], layout[:canvas_height]],
+                 [layout[:photo_width], layout[:photo_height]]
+  end
+
+  def test_with_no_overlay_the_photo_is_bit_identical_across_the_whole_frame
+    overlay = Snappr::Overlay.new(bare_config)
+    in_tmpdir do |dir|
+      noise = Vips::Image.gaussnoise(4032, 3024, mean: 128, sigma: 55).cast(:uchar)
+      source = File.join(dir, "noisy.png")
+      noise.bandjoin([noise.rot180, noise.fliphor]).copy(interpretation: :srgb).write_to_file(source)
+
+      layout = overlay.layout_for(stub_image(4032, 3024), nil, :landscape)
+      image = load_image(overlay.call(source))
+      want = Vips::Image.new_from_file(source)
+                        .extract_area(layout[:crop_left], layout[:crop_top],
+                                      layout[:photo_width], layout[:photo_height])
+
+      assert_equal 0, max_difference(image, want),
+                   "with no overlay the whole output must be the source, bit for bit"
+    end
+  end
+
+  def test_with_no_overlay_depth_and_resolution_still_follow_the_source
+    overlay = Snappr::Overlay.new(bare_config)
+    in_tmpdir do |dir|
+      deep = load_image(overlay.call(write_fixture(dir, "deep.png", 1200, 900, deep: true)))
+      assert_equal :ushort, deep.format
+
+      dpi = load_image(overlay.call(write_fixture(dir, "dpi.jpg", 1200, 900, dpi: DPI_300, Q: 100)))
+      assert_in_delta DPI_300, dpi.xres, 0.01
+    end
+  end
+
+  # A slot pointing at an SVG that has since been moved must degrade to no
+  # overlay with a warning, not take the photo down with it.
+  def test_a_missing_overlay_file_warns_and_prints_the_crop
+    overlay = Snappr::Overlay.new(test_config(landscape: "gone.svg"))
+    in_tmpdir do |dir|
+      result = overlay.process(write_fixture(dir, "wide.png", 1200, 900))
+
+      assert_nil result[:svg]
+      assert_equal [1200, 811], [result[:output_width], result[:output_height]]
+      assert_includes result[:warnings].map { |w| w[:kind] }, "overlay_missing"
+    end
+  end
+
   private
+
+  # No branding at all, which is what a fresh install runs with.
+  def bare_config = Snappr::Config.new(Snappr::Config::DEFAULTS)
 
   # layout_for only reads width and height off the image.
   def stub_image(width, height) = Vips::Image.black(width, height)

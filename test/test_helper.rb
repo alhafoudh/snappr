@@ -133,6 +133,12 @@ module Snappr
 
     def fixture(name) = File.join(FIXTURES, name)
 
+    # config/snappr.yml as the CLI reads it, which is where the sample overlays in
+    # share/ are named. Loaded fresh rather than taken from `Snappr.config`:
+    # that global is process-wide and `Server#hello` reassigns it, so a test that
+    # read it would pass or fail depending on what ran before it.
+    def committed_config = Snappr::Config.load
+
     # A config pointing at fixture overlays, so tests do not depend on whatever
     # branding happens to be committed.
     def test_config(landscape: "window-landscape.svg", portrait: "window-portrait.svg", **overrides)

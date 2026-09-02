@@ -3,7 +3,8 @@ import { DotFilledIcon } from "@radix-ui/react-icons";
 
 import type { Settings, View } from "../types";
 
-export function folderName(path: string) {
+/** The last segment of a path, for a folder or a file. */
+export function baseName(path: string) {
   return path.replace(/\/+$/, "").split("/").pop() || path;
 }
 
@@ -26,6 +27,7 @@ export function Toolbar({
   viewEnabled,
   onToggleWatching,
   onPickWatchDir,
+  onOverlays,
 }: {
   settings: Settings | null;
   count: number;
@@ -34,8 +36,14 @@ export function Toolbar({
   viewEnabled: boolean;
   onToggleWatching: () => void;
   onPickWatchDir: () => void;
+  onOverlays: () => void;
 }) {
   const watching = settings?.watch_enabled ?? false;
+  // Named so the tooltip says what will actually be printed, rather than making
+  // "none" look like a loading state. Cleared is a real, working setting.
+  const landscape = settings?.overlay_svg_landscape;
+  const portrait = settings?.overlay_svg_portrait;
+  const branded = !!(landscape || portrait);
 
   return (
     <Flex direction="column">
@@ -72,8 +80,31 @@ export function Toolbar({
           <Tooltip content={settings ? `Watching ${settings.watch_dir} - click to change` : "Loading..."}>
             <Button size="1" variant="ghost" color="gray" onClick={onPickWatchDir}>
               <Text truncate style={{ maxWidth: "34ch" }}>
-                {settings ? folderName(settings.watch_dir) : "..."}
+                {settings ? baseName(settings.watch_dir) : "..."}
               </Text>
+            </Button>
+          </Tooltip>
+
+          {/* One button rather than two, because the bar is 44px and already
+              dense. It opens a native menu with a submenu per orientation - see
+              the note in App.tsx on why the menus here are the OS's, not Radix's. */}
+          <Tooltip
+            content={
+              settings
+                ? `Landscape: ${landscape ? baseName(landscape) : "no overlay"}\n` +
+                  `Portrait: ${portrait ? baseName(portrait) : "no overlay"}`
+                : "Loading..."
+            }
+          >
+            <Button
+              size="1"
+              variant="ghost"
+              color="gray"
+              onClick={onOverlays}
+              disabled={!settings}
+              aria-label="Overlays"
+            >
+              <Text color={branded ? undefined : "gray"}>{branded ? "Overlays" : "No overlays"}</Text>
             </Button>
           </Tooltip>
 

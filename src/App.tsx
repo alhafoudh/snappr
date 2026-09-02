@@ -7,11 +7,11 @@ import { confirm, open } from "@tauri-apps/plugin-dialog";
 
 import { usePhotos } from "./usePhotos";
 import { useNow } from "./useNow";
-import { Toolbar } from "./components/Toolbar";
+import { Toolbar, baseName } from "./components/Toolbar";
 import { Stage } from "./components/Stage";
 import { Actions } from "./components/Actions";
 import { Filmstrip } from "./components/Filmstrip";
-import type { Photo, View } from "./types";
+import type { Orientation, Photo, View } from "./types";
 
 export default function App() {
   const {
@@ -24,6 +24,7 @@ export default function App() {
     clearPhoto,
     clearAllPhotos,
     changeWatchDir,
+    changeOverlaySvg,
     setWatching,
   } = usePhotos();
   const [view, setView] = useState<View>("overlay");
@@ -237,6 +238,56 @@ export default function App() {
     if (typeof chosen === "string") await changeWatchDir(chosen);
   };
 
+  const overlayOf = (orientation: Orientation) =>
+    (orientation === "landscape" ? settings?.overlay_svg_landscape : settings?.overlay_svg_portrait) ?? null;
+
+  const setOverlay = useCallback(
+    async (orientation: Orientation, path: string | null) => {
+      setProblem(null);
+      try {
+        await changeOverlaySvg(orientation, path);
+      } catch (error) {
+        setProblem(String(error));
+      }
+    },
+    [changeOverlaySvg],
+  );
+
+  const pickOverlay = async (orientation: Orientation) => {
+    const current = overlayOf(orientation);
+    const chosen = await open({
+      multiple: false,
+      filters: [{ name: "SVG", extensions: ["svg"] }],
+      defaultPath: current ?? undefined,
+    });
+    if (typeof chosen === "string") await setOverlay(orientation, chosen);
+  };
+
+  // The branding, one slot per orientation. A submenu each rather than four flat
+  // items, so the label can carry the current filename and the whole state reads
+  // at a glance. Clearing means no overlay at all - snappr ships none, and a
+  // cleared slot prints the crop unbranded.
+  const overlayMenu = () => {
+    const slot = (orientation: Orientation, label: string) => {
+      const current = overlayOf(orientation);
+      return {
+        id: `overlay-${orientation}`,
+        text: `${label}: ${current ? baseName(current) : "None"}`,
+        items: [
+          { id: `pick-${orientation}`, text: "Choose...", action: () => void pickOverlay(orientation) },
+          { item: "Separator" as const },
+          {
+            id: `clear-${orientation}`,
+            text: "Clear",
+            enabled: !!current,
+            action: () => void setOverlay(orientation, null),
+          },
+        ],
+      };
+    };
+    void popup([slot("landscape", "Landscape"), slot("portrait", "Portrait")]);
+  };
+
   const reveal = () => {
     if (!current) return;
     invoke("reveal_photo", { source: current.source }).catch((error) => setProblem(String(error)));
@@ -252,6 +303,7 @@ export default function App() {
         viewEnabled={ready}
         onToggleWatching={() => settings && setWatching(!settings.watch_enabled)}
         onPickWatchDir={pickWatchDir}
+        onOverlays={overlayMenu}
       />
 
       <Flex direction="column" minHeight="0">

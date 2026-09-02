@@ -80,7 +80,7 @@ class OverlaySvgTest < Minitest::Test
   def test_committed_overlays_are_drawn_at_the_print_ratio
     refute_empty committed_overlays, "at least one overlay SVG must be committed"
     committed_overlays.each do |orientation, svg|
-      assert_in_delta Snappr.config.print_ratio(orientation), Snappr::OverlaySvg.aspect_ratio(svg), 0.01,
+      assert_in_delta committed_config.print_ratio(orientation), Snappr::OverlaySvg.aspect_ratio(svg), 0.01,
                       "#{File.basename(svg)} must be drawn at the paper's ratio or it gets stretched"
     end
   end
@@ -119,12 +119,15 @@ class OverlaySvgTest < Minitest::Test
 
   private
 
-  # An orientation may legitimately have no SVG - the pipeline then falls back
-  # to the other one - so only the files that exist are held to these properties.
+  # The sample overlays config/snappr.yml names, which is the only place any are
+  # named now - the app ships none and picks them at runtime. An orientation may
+  # legitimately have no file, so only the ones that exist are held to these
+  # properties.
   def committed_overlays
+    config = committed_config
     Snappr::Config::ORIENTATIONS.filter_map do |orientation|
-      svg = Snappr.config.configured_overlay_svg(orientation)
-      [orientation, svg] if svg.file?
+      svg = config.configured_overlay_svg(orientation)
+      [orientation, svg] if svg&.file?
     end
   end
 
