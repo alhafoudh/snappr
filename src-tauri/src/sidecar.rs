@@ -20,6 +20,7 @@ use std::thread;
 
 use serde_json::{json, Value};
 
+use crate::problem::{detail, Problem};
 use crate::runtime::Runtime;
 
 /// How long to wait for one photo before giving up on it. A 12MP HEIC composites
@@ -46,11 +47,17 @@ impl Sidecar {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| format!("cannot start the Ruby sidecar at {}: {e}", runtime.ruby.display()))?;
+            .map_err(|e| {
+                Problem::PipelineWontStart {
+                    detail: format!("{}: {e}", runtime.ruby.display()),
+                }
+                .say()
+            })?;
 
-        let stdin = child.stdin.take().ok_or("the sidecar has no stdin")?;
-        let stdout = child.stdout.take().ok_or("the sidecar has no stdout")?;
-        let stderr = child.stderr.take().ok_or("the sidecar has no stderr")?;
+        let unreachable = |what| Problem::PipelineUnreachable { what }.say();
+        let stdin = child.stdin.take().ok_or_else(|| unreachable("stdin"))?;
+        let stdout = child.stdout.take().ok_or_else(|| unreachable("stdout"))?;
+        let stderr = child.stderr.take().ok_or_else(|| unreachable("stderr"))?;
 
         let pending: Arc<Mutex<HashMap<u64, Sender<Value>>>> = Arc::default();
 
@@ -136,7 +143,11 @@ impl Sidecar {
         let (tx, rx): (Sender<Value>, Receiver<Value>) = channel();
         self.pending.lock().unwrap().insert(id, tx);
 
-        let line = format!("{}\n", serde_json::to_string(&frame).map_err(|e| e.to_string())?);
+        let line = format!(
+            "{}\n",
+            serde_json::to_string(&frame)
+                .map_err(|e| Problem::PipelineNotResponding { detail: detail(e) }.say())?
+        );
         {
             let mut stdin = self.stdin.lock().unwrap();
             stdin
@@ -144,28 +155,36 @@ impl Sidecar {
                 .and_then(|_| stdin.flush())
                 .map_err(|e| {
                     self.pending.lock().unwrap().remove(&id);
-                    format!("the sidecar is not accepting input: {e}")
+                    Problem::PipelineNotResponding { detail: detail(e) }.say()
                 })?;
         }
 
         let response = rx.recv_timeout(REQUEST_TIMEOUT).map_err(|_| {
             self.pending.lock().unwrap().remove(&id);
-            format!("the sidecar did not answer within {}s", REQUEST_TIMEOUT.as_secs())
+            Problem::PipelineTimedOut { secs: REQUEST_TIMEOUT.as_secs() }.say()
         })?;
 
         if response.get("ok").and_then(Value::as_bool) == Some(true) {
-            Ok(response)
-        } else {
-            let error = response.get("error");
-            Err(format!(
-                "{}: {}",
-                error.and_then(|e| e.get("class")).and_then(Value::as_str).unwrap_or("error"),
-                error
-                    .and_then(|e| e.get("message"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("the sidecar reported a failure"),
-            ))
+            return Ok(response);
         }
+
+        // `error.message` is already the operator's half - Snappr::Problem's
+        // catalogue wrote it - so it is returned untouched. `class` and `code`
+        // are the console's half and are logged here and nowhere else.
+        //
+        // This used to be `format!("{}: {}", class, message)`, which is how
+        // "Snappr::Error: no #FF00FF photo window found in brand.svg" reached the
+        // window. Do not put the class back in front of the message: the split
+        // exists precisely so it cannot.
+        let error = response.get("error");
+        let field = |key| error.and_then(|e| e.get(key)).and_then(Value::as_str);
+        let plain = field("message").unwrap_or("Snappr's image tools reported a problem they could not describe.");
+        log::error!(
+            "{plain} [{}: {}]",
+            field("class").unwrap_or("unknown"),
+            field("code").unwrap_or("uncoded")
+        );
+        Err(plain.to_string())
     }
 
     /// Closing stdin is the documented shutdown: `Server#run` reads to EOF, so the

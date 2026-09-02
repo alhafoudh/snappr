@@ -118,8 +118,9 @@ class ServerTest < Minitest::Test
 
     failure = responses.find { |r| r["id"] == 2 && r.key?("ok") }
     assert_equal false, failure["ok"]
-    assert_equal "Snappr::Error", failure["error"]["class"]
-    assert_match(/no such file/, failure["error"]["message"])
+    assert_equal "Snappr::Problem", failure["error"]["class"]
+    assert_equal "photo_missing", failure["error"]["code"]
+    assert_match(/nope\.jpg/, failure["error"]["message"])
 
     # The point: the server is still serving afterwards.
     assert_equal true, responses.find { |r| r["id"] == 3 }["ok"]
@@ -129,7 +130,7 @@ class ServerTest < Minitest::Test
     responses, = converse({ id: 1, cmd: "overlay", source: "/tmp/whatever.jpg" })
 
     assert_equal false, responses[0]["ok"]
-    assert_match(/hello/, responses[0]["error"]["message"])
+    assert_equal "not_ready", responses[0]["error"]["code"]
   end
 
   def test_malformed_json_does_not_stop_the_loop
@@ -147,7 +148,9 @@ class ServerTest < Minitest::Test
     responses, = converse(hello_frame, { id: 2, cmd: "sing" })
 
     assert_equal false, responses[1]["ok"]
-    assert_match(/unknown cmd/, responses[1]["error"]["message"])
+    assert_equal "unknown_request", responses[1]["error"]["code"]
+    # "sing" is the developer's half, so it must not be in what the shell shows.
+    refute_match(/sing/, responses[1]["error"]["message"])
   end
 
   # A bad value must fail the handshake, not the tenth photo. Config coerces
@@ -156,7 +159,7 @@ class ServerTest < Minitest::Test
     responses, = converse(hello_frame("background" => "not-a-colour"))
 
     assert_equal false, responses[0]["ok"]
-    assert_match(/background/, responses[0]["error"]["message"])
+    assert_equal "background_not_a_colour", responses[0]["error"]["code"]
   end
 
   def test_stdout_carries_only_json
@@ -221,6 +224,35 @@ class ServerTest < Minitest::Test
     assert_equal fixture("window-landscape.svg"), after["svg"]
     refute_equal before["output_width"], after["output_width"],
                  "the new overlay's window should change the canvas the photo lands on"
+  end
+
+  # Two composites of one photo must not share preview filenames.
+  #
+  # The UI draws the previews through `asset://` URLs built out of these paths, and
+  # a webview that has already fetched one serves it from its own cache for the life
+  # of the session. Keyed on the source alone - which is what Preview#key_for used
+  # to do - clearing a photo, picking a different overlay and dropping the same file
+  # in again wrote byte-different JPEGs to exactly the URLs the webview was holding,
+  # so the operator kept seeing the overlay they had just replaced while the PNG on
+  # disk was the new one. Nothing about the source changes between these two runs,
+  # which is the point: the key has to move anyway.
+  def test_a_second_composite_writes_previews_under_a_new_name
+    source = write_fixture(@dir, "IMG_8.jpg", 2400, 1600)
+    responses, = converse(
+      hello_frame("overlay_svg" => { "landscape" => nil, "portrait" => nil }),
+      { id: 2, cmd: "overlay", source: source.to_s },
+      { id: 3, cmd: "configure", preview_dir: @previews,
+        config: { "overlay_svg" => { "landscape" => fixture("window-landscape.svg").to_s,
+                                     "portrait" => nil } } },
+      { id: 4, cmd: "overlay", source: source.to_s }
+    )
+
+    before, after = responses[2]["previews"], responses[5]["previews"]
+
+    %w[thumb overlay source].each do |kind|
+      refute_equal before[kind], after[kind], "the #{kind} preview kept its name across a re-composite"
+      assert_path_exists after[kind]
+    end
   end
 
   # A slot whose file has been moved must not fail the handshake: an app that

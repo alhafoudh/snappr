@@ -28,6 +28,7 @@ export function Toolbar({
   onToggleWatching,
   onPickWatchDir,
   onOverlays,
+  watchProblem,
 }: {
   settings: Settings | null;
   count: number;
@@ -37,8 +38,21 @@ export function Toolbar({
   onToggleWatching: () => void;
   onPickWatchDir: () => void;
   onOverlays: () => void;
+  /**
+   * Why nothing is being watched, when the operator has asked for it and it did
+   * not work. The pill is this message's home rather than the Stage: at an event
+   * the Stage always has a photo in it, and "not watching" has to be visible
+   * while it does.
+   */
+  watchProblem: string | null;
 }) {
-  const watching = settings?.watch_enabled ?? false;
+  // Three states, not two. `watch_enabled` is what the operator asked for, which
+  // is not the same as what is happening - a watch can fail to start and leave
+  // the setting on. Saying "Watching" then is a lie, and it was one the bar told
+  // for a while after a boot-time failure.
+  const wanted = settings?.watch_enabled ?? false;
+  const failed = wanted && watchProblem !== null;
+  const watching = wanted && !failed;
   // Named so the tooltip says what will actually be printed, rather than making
   // "none" look like a loading state. Cleared is a real, working setting.
   const landscape = settings?.overlay_svg_landscape;
@@ -58,22 +72,29 @@ export function Toolbar({
           </Heading>
 
           <Tooltip
-            content={watching ? "Watching the folder - click to pause" : "Paused - click to watch the folder"}
+            content={
+              failed
+                ? `${watchProblem} Click to try again.`
+                : watching
+                  ? "Watching the folder - click to pause"
+                  : "Paused - click to watch the folder"
+            }
           >
             <Button
               size="1"
               variant="outline"
-              color="gray"
+              color={failed ? "red" : "gray"}
               onClick={onToggleWatching}
               disabled={!settings}
               aria-pressed={watching}
             >
               {/* A dot rather than a switch: the word says what it is doing and
-                  the dot says it at a glance from across the room. */}
-              <Text color={watching ? "blue" : "gray"} asChild>
+                  the dot says it at a glance from across the room. Red is the
+                  third state - asked for, and not happening. */}
+              <Text color={failed ? "red" : watching ? "blue" : "gray"} asChild>
                 <DotFilledIcon />
               </Text>
-              {watching ? "Watching" : "Paused"}
+              {failed ? "Not watching" : watching ? "Watching" : "Paused"}
             </Button>
           </Tooltip>
 

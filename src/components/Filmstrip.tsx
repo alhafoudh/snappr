@@ -45,7 +45,13 @@ function Cell({ photo, onMenu }: { photo: Photo; onMenu: (event: React.MouseEven
             )}
             {status && (
               <Box position="absolute" top="0" right="0">
-                <Text as="span" color={status === "failed" ? "red" : "amber"} aria-label={status}>
+                {/* The label is a phrase, not the state's name: a screen reader
+                    read the bare words "failed" and "warned" otherwise. */}
+                <Text
+                  as="span"
+                  color={status === "failed" ? "red" : "amber"}
+                  aria-label={status === "failed" ? "this photo failed" : "this photo has a warning"}
+                >
                   <DotFilledIcon />
                 </Text>
               </Box>

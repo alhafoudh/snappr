@@ -18,7 +18,7 @@ module Snappr
 
     def run
       dir = @config.watch_dir
-      raise Error, "watch dir does not exist: #{dir}" unless dir.directory?
+      raise Problem.new(:watch_dir_missing, path: dir) unless dir.directory?
 
       Snappr.logger.info "watching #{dir} for #{@config.extensions.join(", ")} files"
 
@@ -89,11 +89,13 @@ module Snappr
         destination = @overlay.call(path)
         Snappr.logger.info "#{name}: done"
         open(destination) if @config.open_after?
-      rescue UnstableFileError
-        Snappr.logger.warn "#{name}: never finished writing, skipped"
+      rescue UnstableFileError => e
+        # A stalled transfer is not a broken photo, so it is one calm line rather
+        # than an error. The sentence comes from the catalogue either way.
+        Snappr.logger.warn e.log_line
       rescue StandardError => e
         # One bad photo must not take the daemon down.
-        Snappr.logger.error "#{name}: #{e.class}: #{e.message}"
+        Snappr.logger.error Problem.log_line(e)
       ensure
         release(path)
       end
@@ -111,7 +113,10 @@ module Snappr
       stable = 0
 
       while stable < @config.stability_checks
-        raise UnstableFileError, path.to_s if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+        if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+          raise UnstableFileError.new(:transfer_stalled, file: path.basename, path: path,
+                                                         timeout: @config.stability_timeout)
+        end
 
         current = fingerprint(path)
         stable = current && current == last ? stable + 1 : 0
@@ -129,7 +134,8 @@ module Snappr
 
     def open(destination)
       Snappr.logger.info "#{destination.basename}: opening"
-      system("open", destination.to_s) or Snappr.logger.warn "open failed for #{destination}"
+      system("open", destination.to_s) or
+        Snappr.logger.warn Problem.new(:open_failed, file: destination.basename, path: destination).log_line
     end
   end
 end

@@ -25,7 +25,16 @@ module Snappr
   #   {"id":1,"ok":true,"ruby":"3.4.5","vips":"8.18.4"}
   #   {"id":2,"event":"started","source":"..."}
   #   {"id":2,"ok":true,"destination":"...","previews":{...},...}
-  #   {"id":2,"ok":false,"error":{"class":"Vips::Error","message":"..."}}
+  #   {"id":2,"ok":false,"error":{"class":"Vips::Error","code":"photo_unusable","message":"..."}}
+  #
+  # **`error.message` is written for the operator; `class` and `code` are for the
+  # log.** The shell displays the message verbatim, so nothing technical may go in
+  # it - Snappr::Problem's catalogue is what guarantees that, and what keeps a raw
+  # libvips string out of a red callout in the window. The class and the code
+  # travel so the shell can log them, and the shell must never show either:
+  # prefixing the class onto the message is exactly the bug this split exists to
+  # avoid. `code` is the catalogue key, so it is stable across rewordings and is
+  # the same vocabulary a warning's `kind` uses.
   class Server
     # Only the keys the pipeline actually reads. The watcher-side settings
     # (watch_dir, extensions, stability, open_after) belong to the caller now, so
@@ -57,7 +66,7 @@ module Snappr
       request = begin
         JSON.parse(line)
       rescue JSON::ParserError => e
-        return emit(id: nil, ok: false, error: { class: "JSON::ParserError", message: e.message })
+        return fail_with(nil, Problem.new(:unparseable_request, error: e.message), "JSON::ParserError")
       end
 
       id = request["id"]
@@ -69,13 +78,21 @@ module Snappr
       when "overlay" then overlay(id, request)
       when "ping" then emit(id: id, ok: true, pong: true)
       else
-        emit(id: id, ok: false, error: { class: "Snappr::Error", message: "unknown cmd: #{request["cmd"].inspect}" })
+        fail_with(id, Problem.new(:unknown_request, cmd: request["cmd"].inspect))
       end
     rescue StandardError => e
       # One bad photo must not take the daemon down - the same rule Watcher#handle
       # follows. The caller still has the original file and can ask again.
-      Snappr.logger.error "#{e.class}: #{e.message}"
-      emit(id: request&.dig("id"), ok: false, error: { class: e.class.name, message: e.message })
+      Snappr.logger.error Problem.log_line(e)
+      emit(id: request&.dig("id"), ok: false,
+           error: { class: e.class.name, code: Problem.code(e), message: Problem.plain(e) })
+    end
+
+    # Logs both halves of a catalogued problem and puts the operator's half on
+    # the wire. The class travels for the shell's log and is never displayed.
+    def fail_with(id, problem, klass = problem.class.name)
+      Snappr.logger.error problem.log_line
+      emit(id: id, ok: false, error: { class: klass, code: problem.code, message: problem.message })
     end
 
     def hello(id, request)
@@ -93,7 +110,7 @@ module Snappr
     end
 
     def overlay(id, request)
-      raise Error, "no handshake yet - send hello first" unless @overlay
+      raise Problem.new(:not_ready) unless @overlay
 
       source = request.fetch("source")
       emit(id: id, event: "started", source: source)

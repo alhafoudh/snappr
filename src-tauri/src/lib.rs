@@ -8,6 +8,7 @@
 #[cfg(target_os = "macos")]
 mod mac;
 mod photo;
+mod problem;
 mod runtime;
 mod settings;
 mod sidecar;
@@ -17,12 +18,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use tauri::{AppHandle, DragDropEvent, Emitter, Manager, State, WebviewWindow, WindowEvent};
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_window_state::StateFlags;
 
 use photo::{Index, Photo, Status};
+use problem::{detail, Problem};
 use runtime::Runtime;
 use settings::Settings;
 use sidecar::Sidecar;
+use watcher::{Arrival, Refusal};
 
 /// Whether the pipeline is usable, and why not if it isn't.
 ///
@@ -34,8 +38,24 @@ use sidecar::Sidecar;
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct RuntimeStatus {
     ready: bool,
+    /// The pipeline is unusable. **Only ever set when `ready` is false**, because
+    /// that is the only case the Stage callout renders. A watch that failed to
+    /// start is not this: the pipeline is fine, and drops, `mise run overlay` and
+    /// the retry button all still work. That one goes in `notice`.
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    /// Watching was asked for and did not start. Rendered on the watch pill in
+    /// the toolbar, which stays visible whatever the Stage is showing - and which
+    /// needs its own field rather than sharing `notice`, because the pill offers
+    /// a retry and must only offer it when this is the reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    watch_error: Option<String>,
+    /// A one-off thing the operator should see once, discovered before the window
+    /// existed - today only "your settings could not be read". Held here rather
+    /// than emitted because events are not replayed; the frontend shows it on the
+    /// info line on mount and it clears like any other transient message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notice: Option<String>,
 }
 
 pub struct AppState {
@@ -82,16 +102,17 @@ fn process(app: AppHandle, source: PathBuf) {
     // Already known and finished? Then this is a duplicate event, not a new photo.
     // Known but queued or failed? Then this is a retry of the same photo, and it
     // keeps its arrival time so it neither moves along the strip nor restarts its
-    // "added N minutes ago" label.
-    let known_added_at = {
+    // "added N minutes ago" label. Whatever previews that record owned are the ones
+    // this run supersedes - see discard_superseded.
+    let (known_added_at, superseded) = {
         let index = state.index.lock().unwrap();
         match index.get(&source) {
             Some(p) if matches!(p.status, Status::Processing | Status::Done) => {
                 log::debug!("{} is already handled, ignoring", source.display());
                 return;
             }
-            Some(p) => Some(p.added_at),
-            None => None,
+            Some(p) => (Some(p.added_at), p.owned_previews()),
+            None => (None, Vec::new()),
         }
     };
 
@@ -104,7 +125,7 @@ fn process(app: AppHandle, source: PathBuf) {
 
     let sidecar = state.sidecar.lock().unwrap().clone();
     let Some(sidecar) = sidecar else {
-        photo.fail("the Ruby sidecar is not running".into());
+        photo.fail(Problem::PipelineStarting.say());
         publish(&app, &photo);
         return;
     };
@@ -113,12 +134,15 @@ fn process(app: AppHandle, source: PathBuf) {
         Ok(frame) => photo.complete(&frame),
         Err(error) => {
             // One bad photo must not take the app down, and the original is still
-            // sitting in the drop folder, so retrying is always possible.
-            log::error!("{}: {error}", source.display());
+            // sitting in the drop folder, so retrying is always possible. The
+            // sentence was already logged where it was built; this only adds
+            // which photo it was about.
+            log::error!("the photo was {}", source.display());
             photo.fail(error);
         }
     }
     publish(&app, &photo);
+    discard_superseded(superseded, &photo);
 }
 
 /// The entry point for photos that arrive by hand - dropped on the window or on
@@ -129,16 +153,47 @@ fn process(app: AppHandle, source: PathBuf) {
 /// A drop on the Dock icon can also be what launches the app, in which case the
 /// sidecar is still starting. Those are parked in `pending` and released by the
 /// boot thread the moment the sidecar is up, rather than failed on the spot.
-fn ingest(app: &AppHandle, path: PathBuf) {
+/// One drop, however many files it carried.
+///
+/// The drop is the unit rather than the file, because a drop of four unsupported
+/// files should explain itself once and not stack four alerts. Accepted paths are
+/// processed and refused ones are collected, so a mixed drop still prints the
+/// photos it can and only explains the rest.
+fn ingest_drop(app: &AppHandle, paths: Vec<PathBuf>) {
+    let refused: Vec<(PathBuf, Refusal)> = paths
+        .into_iter()
+        .filter_map(|path| ingest_one(app, path).err())
+        .collect();
+
+    if !refused.is_empty() {
+        explain_refusals(app, refused);
+    }
+}
+
+/// The entry point for one photo that arrived by hand - dropped on the window or
+/// on the Dock icon - rather than through the watcher. Same candidate filter, same
+/// `process`, so a drop behaves exactly like an AirDrop that landed in the folder.
+/// Only the stability wait is skipped: a dropped file is already complete.
+///
+/// A drop on the Dock icon can also be what launches the app, in which case the
+/// sidecar is still starting. Those are parked in `pending` and released by the
+/// boot thread the moment the sidecar is up, rather than failed on the spot.
+fn ingest_one(app: &AppHandle, path: PathBuf) -> Result<(), (PathBuf, Refusal)> {
     let state = app.state::<AppState>();
 
-    let candidate = {
+    let refusal = {
         let settings = state.settings.lock().unwrap();
-        watcher::is_candidate(&path, &settings)
+        watcher::refusal(&path, &settings)
     };
-    if !candidate {
-        log::info!("{} ignored, not a file snappr handles", path.display());
-        return;
+    if let Some(refusal) = refusal {
+        // `watcher::refusal` does no I/O, because it runs on every filesystem
+        // event in a folder with ~1.9k entries. Here there is exactly one path
+        // and it is worth one stat to tell a folder from a nameless file.
+        let refusal = match refusal {
+            Refusal::Unknown if path.is_dir() => Refusal::IsAFolder,
+            other => other,
+        };
+        return Err((path, refusal));
     }
 
     // Hold `pending` while looking at `sidecar`: the boot thread takes the same
@@ -154,13 +209,115 @@ fn ingest(app: &AppHandle, path: PathBuf) {
         log::info!("{} queued until the pipeline is ready", path.display());
         pending.push(path);
     }
+    Ok(())
+}
+
+/// Says why a drop was refused, in a native alert.
+///
+/// A modal, and the only one in the app apart from Clear All's confirm, because a
+/// refused drop is the one failure that otherwise produces *nothing at all*: no
+/// cell, no spinner, no photo, and no line either - the problem line belongs to
+/// the selected photo and this drop never created one. Everything else that can
+/// go wrong has somewhere on screen it belongs.
+///
+/// The OS's alert rather than a Radix dialog, for the reason CLAUDE.md gives for
+/// the context menus, plus one this side: a drop on the Dock icon can be what
+/// *launches* the app, and a frontend-rendered modal cannot explain a drop that
+/// happened before the webview existed.
+///
+/// `show`, never `blocking_show`: this runs on the event thread, and blocking
+/// there freezes the window.
+/// The catalogue entry for one refusal. A free function rather than a closure so
+/// the returned Problem can borrow the path it was given.
+fn refusal_problem<'a>(path: &'a Path, refusal: Refusal, accepted: &str) -> Problem<'a> {
+    let file = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+
+    match refusal {
+        Refusal::AlreadyAPrint => Problem::DropAlreadyAPrint { file },
+        Refusal::IsAFolder => Problem::DropIsAFolder { file },
+        Refusal::StillDownloading => Problem::DropStillDownloading { file },
+        Refusal::Unnamed => Problem::DropUnreadableName { path },
+        // Unknown reaches here only for an extensionless file that is not a
+        // folder, which reads the same way to an operator as a wrong extension.
+        Refusal::Unknown | Refusal::WrongKind => Problem::DropWrongKind {
+            kind: path
+                .extension()
+                .map(|e| format!("a .{} file", e.to_string_lossy()))
+                .unwrap_or_else(|| "not a kind of file snappr knows".into()),
+            file,
+            accepted: accepted.to_string(),
+        },
+    }
+}
+
+fn explain_refusals(app: &AppHandle, refused: Vec<(PathBuf, Refusal)>) {
+    let state = app.state::<AppState>();
+    let accepted = {
+        let settings = state.settings.lock().unwrap();
+        settings.extensions.join(", ").to_uppercase()
+    };
+
+    // Each sentence is logged as it is built, so the console carries the paths
+    // and the alert carries only the sentences.
+    let mut sentences: Vec<String> = refused
+        .iter()
+        .map(|(path, refusal)| refusal_problem(path, *refusal, &accepted).warn())
+        .collect();
+
+    // One refusal reads as a sentence on its own; several want a lead-in and a
+    // bullet each, because every sentence already names its own file and a run
+    // of them reads as one paragraph otherwise.
+    let body = if sentences.len() == 1 {
+        sentences.remove(0)
+    } else {
+        format!(
+            "Snappr could not use {} of the files you dropped.\n\n{}",
+            sentences.len(),
+            sentences.iter().map(|s| format!("- {s}")).collect::<Vec<_>>().join("\n")
+        )
+    };
+
+    let title = if refused.len() == 1 { "Nothing to print" } else { "Some files were skipped" };
+    app.dialog()
+        .message(body)
+        .title(title)
+        // A warning, not an error: the operator did nothing wrong, snappr just
+        // cannot use what they dropped.
+        .kind(MessageDialogKind::Warning)
+        .show(|_| {});
 }
 
 fn start_watching(app: &AppHandle, settings: &Settings) -> Result<(), String> {
     let handle = app.clone();
-    let watcher = watcher::spawn(settings.watch_dir.clone(), settings.clone(), move |path| {
+    // By value: the closure outlives this call, so it cannot borrow `settings`.
+    let timeout = settings.stability_timeout().as_secs();
+    let watcher = watcher::spawn(settings.watch_dir.clone(), settings.clone(), move |arrival| {
         let handle = handle.clone();
-        std::thread::spawn(move || process(handle, path));
+        match arrival {
+            Arrival::Settled(path) => {
+                std::thread::spawn(move || process(handle, path));
+            }
+            // The watcher gave up on a file that never stopped changing, and no
+            // Photo record was ever published for it - so without this the
+            // operator's AirDrop simply vanishes. A failed cell is self-healing:
+            // if the transfer was cancelled the record is dropped on the next
+            // launch by Photo::intact, and if it completes later the watcher
+            // re-sees the file and `process` replaces the record in place.
+            Arrival::Abandoned(path) => {
+                let mut photo = Photo::queued(path.clone());
+                let said = Problem::TransferStalled {
+                    file: photo.name.clone(),
+                    path: &path,
+                    secs: timeout,
+                }
+                .warn();
+                photo.fail(said);
+                publish(&handle, &photo);
+            }
+        }
     })?;
 
     app.state::<AppState>()
@@ -170,6 +327,30 @@ fn start_watching(app: &AppHandle, settings: &Settings) -> Result<(), String> {
         .replace(watcher);
     log::info!("watching {}", settings.watch_dir.display());
     Ok(())
+}
+
+/// Starts the watch and keeps the toolbar's notice in step with the outcome.
+///
+/// Every path that turns watching on goes through here - boot, the pill, and a
+/// change of folder - so the pill can never claim to be watching when it is not.
+/// That was a real lie and not just a missing message: `set_watching` put
+/// `watch_enabled` back to false on failure but the boot path did not, so after a
+/// boot-time watch failure the bar said "Watching" over a folder nothing was
+/// looking at.
+fn start_watching_noted(app: &AppHandle, settings: &Settings) -> Result<(), String> {
+    let result = start_watching(app, settings);
+    set_watch_error(app, result.as_ref().err().cloned());
+    result
+}
+
+/// Records whether the watch is working, leaving the rest of the status alone.
+fn set_watch_error(app: &AppHandle, watch_error: Option<String>) {
+    let mut status = app.state::<AppState>().runtime.lock().unwrap().clone();
+    if status.watch_error == watch_error {
+        return;
+    }
+    status.watch_error = watch_error;
+    set_runtime_status(app, status);
 }
 
 #[tauri::command]
@@ -206,7 +387,7 @@ fn get_settings(state: State<AppState>) -> Settings {
 #[tauri::command]
 fn set_watch_dir(app: AppHandle, state: State<AppState>, dir: PathBuf) -> Result<Settings, String> {
     if !dir.is_dir() {
-        return Err(format!("{} is not a directory", dir.display()));
+        return Err(Problem::NotAFolder { path: &dir }.say());
     }
 
     let updated = {
@@ -217,7 +398,7 @@ fn set_watch_dir(app: AppHandle, state: State<AppState>, dir: PathBuf) -> Result
     };
 
     if updated.watch_enabled {
-        start_watching(&app, &updated)?;
+        start_watching_noted(&app, &updated)?;
     }
     Ok(updated)
 }
@@ -243,12 +424,16 @@ fn set_overlay_svg(
     orientation: String,
     path: Option<PathBuf>,
 ) -> Result<Settings, String> {
+    // Internal: the Overlays menu only ever sends one of the two, so this is a
+    // bug in the caller rather than anything an operator did. No catalogue entry
+    // for the same reason - nobody will read it.
     if !matches!(orientation.as_str(), "landscape" | "portrait") {
         return Err(format!("unknown orientation: {orientation}"));
     }
     if let Some(path) = &path {
         if !path.is_file() {
-            return Err(format!("{} is not a file", path.display()));
+            let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            return Err(Problem::OverlayFileGone { file, path }.say());
         }
     }
     let chosen = path
@@ -292,9 +477,10 @@ fn set_watching(app: AppHandle, state: State<AppState>, enabled: bool) -> Result
     };
 
     if enabled {
-        if let Err(error) = start_watching(&app, &updated) {
+        if let Err(error) = start_watching_noted(&app, &updated) {
             // Do not claim to be watching when we are not: put the setting back
-            // and let the UI re-read it.
+            // and let the UI re-read it. The notice start_watching_noted left
+            // behind is what the pill shows in the meantime.
             let mut settings = state.settings.lock().unwrap();
             settings.watch_enabled = false;
             settings.save(&app)?;
@@ -302,6 +488,8 @@ fn set_watching(app: AppHandle, state: State<AppState>, enabled: bool) -> Result
         }
     } else {
         state.watcher.lock().unwrap().take();
+        // "Paused" is honest on its own, so any standing complaint goes away.
+        set_watch_error(&app, None);
         log::info!("watching paused");
     }
     Ok(updated)
@@ -331,18 +519,42 @@ fn reprocess(app: AppHandle, state: State<AppState>, source: PathBuf) -> Result<
 /// enough to leave unconfirmed for a single cell.
 fn discard(app: &AppHandle, gone: Vec<Photo>) -> usize {
     for path in gone.iter().flat_map(Photo::owned_previews) {
-        match std::fs::remove_file(&path) {
-            Ok(()) => log::debug!("deleted {}", path.display()),
-            // Already gone is the outcome we wanted, not a failure worth logging.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => log::warn!("cannot delete {}: {e}", path.display()),
-        }
+        delete_preview(&path);
     }
 
     let sources: Vec<&PathBuf> = gone.iter().map(|p| &p.source).collect();
     log::info!("cleared {} photo(s) from the filmstrip", sources.len());
     let _ = app.emit("cleared", &sources);
     sources.len()
+}
+
+/// Deletes the previews an earlier composite of the same photo owned.
+///
+/// A photo's preview filenames are keyed on the composite, not on the source alone
+/// (`Snappr::Preview#key_for` says why), so re-running one - a retry, or the same
+/// file dropped in again after the overlay was changed - leaves the previous set
+/// behind with nothing pointing at it. Deleting exactly what the superseded record
+/// named, and only what the new one does not, is the whole of the cleanup: the
+/// index is the only thing that ever knew those paths.
+///
+/// Called after `publish`, so the record on disk already points at the survivors
+/// and a crash in between leaks three JPEGs rather than blanking a live cell.
+fn discard_superseded(previous: Vec<PathBuf>, photo: &Photo) {
+    let current = photo.owned_previews();
+    for path in previous.iter().filter(|path| !current.contains(path)) {
+        delete_preview(path);
+    }
+}
+
+/// Removes one preview JPEG. Only ever called on paths inside the app's own data
+/// directory - nothing in the watched folder is snappr's to delete.
+fn delete_preview(path: &Path) {
+    match std::fs::remove_file(path) {
+        Ok(()) => log::debug!("deleted {}", path.display()),
+        // Already gone is the outcome we wanted, not a failure worth logging.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => log::warn!("cannot delete {}: {e}", path.display()),
+    }
 }
 
 /// Clears one cell from the filmstrip.
@@ -394,15 +606,15 @@ fn destination_of(state: &State<AppState>, source: &Path) -> Result<(PathBuf, bo
     let index = state.index.lock().unwrap();
     let photo = index
         .get(source)
-        .ok_or_else(|| format!("{} is not in the index", source.display()))?;
+        .ok_or_else(|| Problem::PhotoForgotten { path: source }.say())?;
     if photo.status != Status::Done {
-        return Err("that photo has not finished processing".into());
+        return Err(Problem::PhotoStillWorking.say());
     }
     let destination = photo
         .destination
         .clone()
         .filter(|d| d.exists())
-        .ok_or("the overlay PNG is gone - try processing the photo again")?;
+        .ok_or_else(|| Problem::PrintFileGone.say())?;
     Ok((destination, photo.orientation.as_deref() == Some("landscape")))
 }
 
@@ -435,8 +647,12 @@ fn reveal_photo(state: State<AppState>, source: PathBuf) -> Result<(), String> {
         .arg("-R")
         .arg(&destination)
         .status()
-        .map_err(|e| format!("cannot open Finder: {e}"))
-        .and_then(|s| s.success().then_some(()).ok_or("Finder refused".into()))
+        .map_err(|e| Problem::FinderWontOpen { detail: detail(e) }.say())
+        .and_then(|status| {
+            status.success().then_some(()).ok_or_else(|| {
+                Problem::FinderWontOpen { detail: format!("open -R exited {status}") }.say()
+            })
+        })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -492,16 +708,20 @@ pub fn run() {
         // to the file - which is what it did while the flag was off.
         .on_window_event(|window, event| {
             if let WindowEvent::DragDrop(DragDropEvent::Drop { paths, .. }) = event {
-                for path in paths {
-                    ingest(window.app_handle(), path.clone());
-                }
+                // The whole drop at once, so a drop carrying several files it
+                // cannot use explains itself once rather than once per file.
+                ingest_drop(window.app_handle(), paths.clone());
             }
         })
         .setup(|app| {
             let handle = app.handle().clone();
             let state = app.state::<AppState>();
 
-            let settings = Settings::load(&handle);
+            // A settings file that could not be read has already been moved aside
+            // and reported; the sentence comes back here because this runs before
+            // the window exists. It rides along on the runtime status, which the
+            // frontend pulls on mount for exactly this reason.
+            let (settings, reset) = Settings::load(&handle);
             *state.settings.lock().unwrap() = settings.clone();
             *state.index.lock().unwrap() = Index::load(&handle);
 
@@ -538,19 +758,42 @@ pub fn run() {
                         // failed to start still leaves drops, `mise run overlay`
                         // and the retry button working, so this is reported rather
                         // than treated as the app being broken.
-                        let error = if settings.watch_enabled {
-                            start_watching(&boot, &settings).err().inspect(|e| log::error!("{e}"))
+                        //
+                        // It goes in `notice`, not `error`. `error` is rendered by
+                        // the Stage only while the pipeline is down, so a watch
+                        // failure put there was invisible - and at an event the
+                        // Stage always has a photo in it. `watch_error` is drawn
+                        // on the watch pill, which is where "not watching"
+                        // belongs anyway.
+                        //
+                        // start_watching, not start_watching_noted: the whole
+                        // status is set wholesale below, so going through the
+                        // noted variant would emit the event twice.
+                        let watch_failed = if settings.watch_enabled {
+                            start_watching(&boot, &settings).err()
                         } else {
                             log::info!("watching is paused, not watching {}", settings.watch_dir.display());
                             None
                         };
-                        set_runtime_status(&boot, RuntimeStatus { ready: true, error });
-                    }
-                    Err(error) => {
-                        log::error!("the pipeline is unavailable: {error}");
                         set_runtime_status(
                             &boot,
-                            RuntimeStatus { ready: false, error: Some(error) },
+                            RuntimeStatus {
+                                ready: true,
+                                error: None,
+                                watch_error: watch_failed,
+                                notice: reset,
+                            },
+                        );
+                    }
+                    Err(error) => {
+                        set_runtime_status(
+                            &boot,
+                            RuntimeStatus {
+                                ready: false,
+                                error: Some(error),
+                                watch_error: None,
+                                notice: reset,
+                            },
                         );
                     }
                 }
@@ -580,8 +823,10 @@ pub fn run() {
             tauri::RunEvent::Opened { urls } => {
                 for url in urls {
                     match url.to_file_path() {
-                        Ok(path) => ingest(app, path),
-                        Err(()) => log::warn!("asked to open {url}, which is not a file"),
+                        Ok(path) => ingest_drop(app, vec![path]),
+                        Err(()) => {
+                            Problem::DropNotAFile { url: url.to_string() }.warn();
+                        }
                     }
                 }
             }

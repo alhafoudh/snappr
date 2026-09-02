@@ -43,7 +43,9 @@ module Snappr
     # return value straight to Pathname methods.
     def process(source)
       source = Pathname.new(source).expand_path
-      raise Error, "no such file: #{source}" unless source.file?
+      unless source.file?
+        raise Problem.new(:photo_missing, file: source.basename, path: source)
+      end
 
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       name = source.basename
@@ -67,7 +69,7 @@ module Snappr
         name, layout[:photo_width], layout[:photo_height], layout[:crop_left], layout[:crop_top],
         layout[:canvas_width], layout[:canvas_height]
       )
-      overlay = overlay_for(image, svg, layout[:canvas_width], layout[:canvas_height], warnings) if svg
+      overlay = overlay_for(image, svg, layout[:canvas_width], layout[:canvas_height], orientation, warnings) if svg
       background = background_for(image)
 
       destination = destination_for(source)
@@ -150,7 +152,7 @@ module Snappr
     # seam to hide, so this comes out as a plain centre crop to the print ratio
     # with the canvas equal to the crop. Nothing special-cases it further down.
     def layout_for(image, svg, orientation)
-      window = svg ? OverlaySvg.photo_window(svg) : FULL_FRAME
+      window = svg ? OverlaySvg.photo_window(svg, slot: slot_for(orientation)) : FULL_FRAME
       margin = svg ? SEAM_MARGIN : 0
       # The window's shape in output pixels depends on the canvas shape, which is
       # the paper's ratio.
@@ -218,8 +220,8 @@ module Snappr
     # colours have to be converted into it, or they are reinterpreted and come out
     # wrong. White and black are identical in both, so this is a no-op for
     # achromatic branding and insurance for anything with colour in it.
-    def overlay_for(image, svg, width, height, warnings = nil)
-      overlay = OverlaySvg.render(svg, width, height, warnings: warnings)
+    def overlay_for(image, svg, width, height, orientation, warnings = nil)
+      overlay = OverlaySvg.render(svg, width, height, warnings: warnings, slot: slot_for(orientation))
       profile = image.get("icc-profile-data") if image.get_fields.include?("icc-profile-data")
       return overlay unless profile
 
@@ -231,29 +233,37 @@ module Snappr
         overlay.icc_transform(file.path, input_profile: "srgb")
       end
     rescue Vips::Error => e
-      message = "colour profile unusable, compositing the overlay as sRGB: #{e.message.lines.first.strip}"
-      Snappr.logger.warn message
-      warnings&.push({ kind: "profile_unusable", message: message })
+      Problem.warn(warnings, :profile_unusable, error: e.message.lines.first.strip)
       overlay
     end
+
+    # How a message names an overlay slot: the same words the Overlays menu uses,
+    # so the operator knows which of the two to go and fix.
+    def slot_for(orientation) = "#{orientation} overlay"
 
     # The overlay is stretched to fill the frame, so one drawn at the wrong shape
     # is silently distorted. Say so rather than letting it look like a rendering
     # bug: an overlay for this pipeline should be drawn at the paper's ratio.
     def warn_on_aspect_mismatch(svg, orientation, warnings = nil)
-      drawn = OverlaySvg.aspect_ratio(svg)
+      drawn = OverlaySvg.aspect_ratio(svg, slot: slot_for(orientation))
       wanted = @config.print_ratio(orientation)
       return if drawn.nil? || (drawn - wanted).abs <= wanted * 0.01
 
-      message = format(
-        "%s is drawn at %.3f:1 but %s prints at %.3f:1 - it will be stretched. " \
-        "Redraw it at %d x %d (or any size with that ratio).",
-        File.basename(svg), drawn, orientation, wanted,
-        *(orientation == :landscape ? [@config.print_long_mm * 20, @config.print_short_mm * 20]
-                                    : [@config.print_short_mm * 20, @config.print_long_mm * 20])
+      width, height = if orientation == :landscape
+        [@config.print_long_mm * 20, @config.print_short_mm * 20]
+      else
+        [@config.print_short_mm * 20, @config.print_long_mm * 20]
+      end
+
+      Problem.warn(
+        warnings, :aspect_mismatch,
+        slot: slot_for(orientation), file: File.basename(svg), orientation: orientation,
+        width: width.round, height: height.round,
+        # The two ratios are the developer's half: they say how far off it is,
+        # which is no help at all to someone about to redraw it at the size the
+        # sentence already names.
+        drawn: format("%.3f", drawn), wanted: format("%.3f", wanted)
       )
-      Snappr.logger.warn message
-      warnings&.push({ kind: "aspect_mismatch", message: message })
     end
   end
 end

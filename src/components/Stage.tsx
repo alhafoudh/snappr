@@ -67,6 +67,11 @@ export function Stage({
               <ExclamationTriangleIcon />
             </Callout.Icon>
             <Callout.Text>{runtime.error}</Callout.Text>
+            {/* The one piece of developer instruction the operator's window
+                carries, and it stays: it is genuinely the fix, there is nobody
+                else to tell, and at size="1" underneath the sentence it reads
+                as the small print it is. The Rust side deliberately does not
+                repeat it - see Runtime::check. */}
             <Callout.Text size="1">
               Run <Code>mise run runtime</Code> and restart the app.
             </Callout.Text>
@@ -76,7 +81,10 @@ export function Stage({
       return (
         <Flex align="center" gap="2">
           <Spinner />
-          <Text color="gray">Starting the image pipeline...</Text>
+          {/* Not "starting the image pipeline": "pipeline" is our word for the
+              Ruby child process and means nothing to an operator waiting for
+              the app to be usable. */}
+          <Text color="gray">Getting ready...</Text>
         </Flex>
       );
     }

@@ -29,6 +29,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use notify::{Event, RecursiveMode, Watcher as _};
 
+use crate::problem::{detail, Problem};
 use crate::settings::Settings;
 
 const PARTIAL_EXTENSIONS: [&str; 3] = ["download", "part", "crdownload"];
@@ -53,32 +54,85 @@ fn fingerprint(path: &Path) -> Option<Fingerprint> {
     })
 }
 
-pub fn is_candidate(path: &Path, settings: &Settings) -> bool {
+/// Why a file is not a photo snappr will print.
+///
+/// Two constraints, both from the hot path. `refusal` runs on every filesystem
+/// event in the drop folder - `~/Downloads` has about 1.9k top-level entries and
+/// refusal is the *common* answer there - so:
+///
+/// 1. **No payload.** A `String` here would allocate on every rejected event.
+///    The extension is re-derived only when a sentence is actually being written.
+/// 2. **No I/O.** `is_candidate` touches no disk today and must not start: a
+///    `stat` per event is exactly what the `RecursiveMode::NonRecursive` note at
+///    the top of this file exists to avoid. So an extensionless path comes back
+///    as `Unknown`, and the drop path - which has one file, not 1.9k - upgrades
+///    it to `IsAFolder` with a single `is_dir()`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Refusal {
+    /// The name is not readable as UTF-8.
+    Unnamed,
+    /// snappr's own output, including the in-progress `.tmp-<pid>.overlay.png`.
+    AlreadyAPrint,
+    /// A `.download`, `.part` or `.crdownload` placeholder.
+    StillDownloading,
+    /// No extension at all. Might be a folder - only the caller can afford to look.
+    Unknown,
+    /// A folder. Never returned by `refusal`; only by the drop path's upgrade.
+    IsAFolder,
+    /// A real extension, just not one snappr prints.
+    WrongKind,
+}
+
+/// The same test as [`is_candidate`], saying why when it says no.
+///
+/// This is the single implementation of the rule and `is_candidate` delegates to
+/// it, so the watcher's filter and the drop's explanation can never drift apart.
+pub fn refusal(path: &Path, settings: &Settings) -> Option<Refusal> {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-        return false;
+        return Some(Refusal::Unnamed);
     };
     let lower = name.to_ascii_lowercase();
 
     // The self-output guard. Also catches the in-progress `.tmp-<pid>.overlay.png`,
     // which carries the same suffix precisely so one test covers both.
     if lower.ends_with(&settings.output_suffix.to_ascii_lowercase()) {
-        return false;
+        return Some(Refusal::AlreadyAPrint);
     }
 
     let Some(extension) = Path::new(&lower).extension().and_then(|e| e.to_str()) else {
-        return false;
+        return Some(Refusal::Unknown);
     };
     if PARTIAL_EXTENSIONS.contains(&extension) {
-        return false;
+        return Some(Refusal::StillDownloading);
     }
-    settings.extensions.iter().any(|allowed| allowed == extension)
+    if settings.extensions.iter().any(|allowed| allowed == extension) {
+        None
+    } else {
+        Some(Refusal::WrongKind)
+    }
 }
 
-/// Watches `dir`, calling `on_photo` once per photo, after it has stopped changing.
-/// The returned watcher must be kept alive; dropping it stops the watch.
-pub fn spawn<F>(dir: PathBuf, settings: Settings, on_photo: F) -> Result<notify::RecommendedWatcher, String>
+pub fn is_candidate(path: &Path, settings: &Settings) -> bool {
+    refusal(path, settings).is_none()
+}
+
+/// What the poll loop concluded about a file it was watching.
+///
+/// `Abandoned` is reported rather than only logged because no Photo record has
+/// been published for that file yet, so there is nothing on screen for the
+/// operator to notice. A stalled AirDrop used to disappear in silence.
+pub enum Arrival {
+    /// Size and mtime stopped changing: it is a whole photo.
+    Settled(PathBuf),
+    /// It never stopped changing before the timeout.
+    Abandoned(PathBuf),
+}
+
+/// Watches `dir`, calling `on_arrival` once per file it reaches a conclusion
+/// about. The returned watcher must be kept alive; dropping it stops the watch.
+pub fn spawn<F>(dir: PathBuf, settings: Settings, on_arrival: F) -> Result<notify::RecommendedWatcher, String>
 where
-    F: Fn(PathBuf) + Send + 'static,
+    F: Fn(Arrival) + Send + 'static,
 {
     let (tx, rx) = channel::<Event>();
 
@@ -87,11 +141,11 @@ where
             let _ = tx.send(event);
         }
     })
-    .map_err(|e| format!("cannot create a watcher: {e}"))?;
+    .map_err(|e| Problem::CannotWatch { path: &dir, detail: detail(e) }.say())?;
 
     watcher
         .watch(&dir, RecursiveMode::NonRecursive)
-        .map_err(|e| format!("cannot watch {}: {e}", dir.display()))?;
+        .map_err(|e| Problem::CannotWatch { path: &dir, detail: detail(e) }.say())?;
 
     thread::spawn(move || {
         // Files seen but not yet settled: path -> (last fingerprint, how many
@@ -156,19 +210,16 @@ where
             }
 
             for path in abandoned {
+                // A file that settled on this same poll is finished, not stalled.
                 if !settled.contains(&path) {
-                    log::warn!(
-                        "{} never stopped changing after {}s, giving up on it",
-                        path.display(),
-                        settings.stability_timeout().as_secs()
-                    );
+                    on_arrival(Arrival::Abandoned(path.clone()));
                 }
                 arriving.remove(&path);
             }
             for path in settled {
                 arriving.remove(&path);
                 log::info!("{} has settled", path.display());
-                on_photo(path);
+                on_arrival(Arrival::Settled(path));
             }
 
             if disconnected && arriving.is_empty() {

@@ -2,7 +2,7 @@ import { forwardRef } from "react";
 import { Box, Button, Flex, Kbd, Text, Tooltip } from "@radix-ui/themes";
 import { MagnifyingGlassIcon, ReloadIcon, Share1Icon } from "@radix-ui/react-icons";
 
-import type { Exif, Photo } from "../types";
+import type { Exif, Level, Notice, Photo } from "../types";
 import { relativeTime } from "../relativeTime";
 
 /**
@@ -77,26 +77,36 @@ function takenAt(exif?: Exif) {
 }
 
 /**
+ * One problem on the info line: red for a failure, amber for something that
+ * happened differently than asked.
+ *
+ * The Tooltip is not decoration. The line truncates, so without it a message
+ * longer than the row is simply unreadable - which is what the `problem` branch
+ * used to do while the warnings branch beside it had a tooltip all along. `full`
+ * is for when there is more to say than the line shows, as with several warnings
+ * on one photo; it is the same message either way, never the technical half.
+ */
+function NoticeLine({ level, text, full }: { level: Level; text: string; full?: string }) {
+  return (
+    <Tooltip content={full ?? text}>
+      <Text size="1" color={level === "error" ? "red" : "amber"} truncate>
+        {text}
+      </Text>
+    </Tooltip>
+  );
+}
+
+/**
  * The information line under the photo, in priority order: what went wrong with
  * the photo, then what went wrong with the last thing the operator asked for,
  * then the facts about the print that is about to be made.
  */
-function Info({ current, ready, problem, now }: { current: Photo | null; ready: boolean; problem: string | null; now: number }) {
+function Info({ current, ready, problem, now }: { current: Photo | null; ready: boolean; problem: Notice | null; now: number }) {
   if (current?.warnings.length) {
-    return (
-      <Tooltip content={current.warnings.join("\n")}>
-        <Text size="1" color="amber" truncate>
-          {current.warnings[0]}
-        </Text>
-      </Tooltip>
-    );
+    return <NoticeLine level="warning" text={current.warnings[0]} full={current.warnings.join("\n")} />;
   }
   if (problem) {
-    return (
-      <Text size="1" color="red" truncate>
-        {problem}
-      </Text>
-    );
+    return <NoticeLine level={problem.level} text={problem.text} />;
   }
   if (ready && current) {
     const added = new Date(current.added_at * 1000);
@@ -166,7 +176,7 @@ export const Actions = forwardRef<
     current: Photo | null;
     ready: boolean;
     busy: "share" | "print" | null;
-    problem: string | null;
+    problem: Notice | null;
     now: number;
     onReprocess: (source: string) => void;
     onReveal: () => void;

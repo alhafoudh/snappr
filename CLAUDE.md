@@ -213,10 +213,17 @@ There is no `var/`. snappr creates no directories and writes no databases, logs
 or staging trees. `~/Downloads` is the only path outside the project it touches,
 and the only thing it ever writes there is the `.overlay.png` beside each photo.
 
-**snappr never moves or deletes anything.** Files it does not recognise are
-ignored, not swept, not quarantined. `~/Downloads` is the user's real downloads
-folder with hundreds of unrelated files in it; treat it as read-only apart from
-the one file snappr adds.
+**snappr never moves or deletes anything in the drop folder.** Files it does not
+recognise are ignored, not swept, not quarantined. `~/Downloads` is the user's real
+downloads folder with hundreds of unrelated files in it; treat it as read-only
+apart from the one file snappr adds.
+
+There is exactly one rename anywhere, and it is inside the app's own support
+folder: a `settings.json` that will not parse is moved to `settings.json.broken`
+before the defaults are used. That is not tidiness. The next `save()` would
+otherwise overwrite it - and the watch toggle saves on its first click - so
+without the rename the message telling the operator their overlays were reset
+would be announcing a loss that was already unrecoverable.
 
 Logs go to stdout.
 
@@ -589,17 +596,84 @@ Re-verify these if libvips is upgraded. They were established empirically.
   the visible region's shape instead would show ~23% more pixels and a gentler
   crop, at the cost of changing the composition. Considered and not done.
 
+## What the app is allowed to say
+
+**Every message exists in exactly two versions, declared together.** The
+catalogues are `lib/snappr/problem.rb` (a `CATALOG` hash keyed by a stable code)
+and `src-tauri/src/problem.rs` (an enum, with one arm per problem in
+`Problem::parts`). Nothing writes a user-facing string anywhere else.
+
+| half | goes to | may contain |
+|---|---|---|
+| `ui` | the window, and the first part of every log line | one or two plain sentences: what happened, then what to do |
+| `detail` | the console only | the exception class, the errno, the libvips text, full paths, ratios |
+
+`ui` may not contain a class name, a hex literal, a backticked shell command, or
+any of this repo's own vocabulary - "sidecar", "handshake", "viewBox", "keying
+out", "index", "pipeline". A path appears in `ui` only when the operator has to go
+and look at it (the watched folder), never as decoration on a sentence that reads
+without it. `problem_test.rb` asserts all of this against the table, so reword
+freely - the tests assert on **codes**, not wording.
+
+This exists because it was got wrong. The app used to show
+`Snappr::Error: no #FF00FF photo window found in brand.svg`: `sidecar.rs` built
+its display string as `format!("{}: {}", class, message)`, and the message itself
+had been written at the raise site for whoever wrote the code. **Do not put the
+class back in front of the message** - `error.class` and `error.code` travel on the
+wire so the shell can *log* them, and `Server`'s frame comment says so.
+
+Anything snappr did not raise itself - `Vips::Error`, `KeyError`, a coercion
+failure - never shows its own text. `Problem.plain` substitutes the catalogue's
+`photo_unusable` sentence and keeps the original for the log. There is no
+message-matching anywhere: the mapping is by exception class, and an uncatalogued
+class falls through to one generic sentence rather than leaking.
+
+**Four channels, and each kind of problem has exactly one home.**
+
+| kind | channel | where it shows |
+|---|---|---|
+| about one photo | `photo.error` / `photo.warnings` | Stage callout + Try again, filmstrip dot, info line |
+| about the last thing the operator did | `problem` in `App.tsx`, a `{level, text}` | the info line, red for a failure and amber for a caveat |
+| discovered after the command returned | the `notice` Tauri event | the same info line |
+| watching asked for and not happening | `RuntimeStatus.watch_error` | the watch pill's third state |
+
+`RuntimeStatus.error` is **only ever set when `ready` is false**, because that is
+the only case `Stage` renders it. A watch failure put there was invisible, since at
+an event the Stage always has a photo in it. The pill is the home for that instead,
+and it needs its own field rather than sharing `notice`: the pill offers a retry,
+and must only offer it when a failed watch is the reason. Note the pill's failed
+state keeps `watch_enabled` true - the operator *asked* for watching - so its click
+handler retries rather than toggling, or it would pause.
+
+**A modal is only for a gesture that otherwise produced nothing at all.** Today
+that is exactly one thing: a drag & drop snappr refused. There is no cell, no
+spinner, no photo, and no line either - the info line belongs to the selected
+photo and the drop never made one. Everything else has somewhere on screen it
+belongs, and a modal per print would be intolerable at an event. It is the OS's
+alert (`app.dialog().message(...)` from Rust, `show` and never `blocking_show`),
+raised on the Rust side because a drop on the Dock icon can be what *launches* the
+app - a frontend modal cannot explain a drop from before the webview existed.
+
+`watcher::refusal` is the single implementation of the candidate rule and
+`is_candidate` delegates to it, so the filter and the explanation cannot drift.
+`Refusal` carries **no payload and does no I/O**: it runs on every fsevent in a
+folder with ~1.9k entries and refusal is the common answer there. `ingest_one`
+upgrades `Unknown` to `IsAFolder` with one `is_dir()`, on the single path the
+operator actually dropped.
+
 ## Repo layout
 
 ```
 bin/snappr                CLI entrypoint
 lib/snappr.rb             Zeitwerk setup, the svgload unblock, Snappr.root/.config/.logger
+lib/snappr/problem.rb     THE MESSAGE CATALOGUE: every message, both halves
 lib/snappr/config.rb      config/snappr.yml, project-relative path resolution
 lib/snappr/exif.rb        camera, lens and exposure off the source header, for the UI
 lib/snappr/overlay_svg.rb renders an overlay at a pixel size, finds its #FF00FF window
 lib/snappr/overlay.rb     orientation, window fit, colour-managed composite, PNG save
 lib/snappr/watcher.rb     drop folder via the listen gem, candidate? guard, stability check
 lib/snappr/cli.rb         subcommand dispatch (Snappr::CLI)
+src-tauri/src/problem.rs  the shell's half of the catalogue, same two-version rule
 share/                       sample overlays for the CLI and for testing - NOT
                              shipped branding, and never in bundle.resources
 test/fixtures/               the same design in several SVG dialects

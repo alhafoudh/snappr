@@ -129,6 +129,9 @@ export function usePhotos() {
     });
   }, []);
 
+  // Throws on failure, following the convention above: the caller shows it. It
+  // had no catch anywhere for a while, so "that is not a folder" and any
+  // settings-save failure were lost as unhandled rejections.
   const changeWatchDir = useCallback(async (dir: string) => {
     setSettings(await invoke<Settings>("set_watch_dir", { dir }));
   }, []);
@@ -145,9 +148,12 @@ export function usePhotos() {
       setSettings(await invoke<Settings>("set_watching", { enabled }));
     } catch (error) {
       // The shell has already put the setting back to what it could actually
-      // do, so re-read it and let the toggle show that rather than the wish.
-      console.error(error);
+      // do, so re-read it and let the toggle show that rather than the wish -
+      // and only then rethrow, so the caller can say why. This used to stop at
+      // console.error, which left the toggle snapping back with no explanation
+      // anywhere on screen.
       setSettings(await invoke<Settings>("get_settings"));
+      throw error;
     }
   }, []);
 

@@ -56,18 +56,16 @@ module Snappr
       return nil if wanted.nil?
       return wanted if wanted.file?
 
-      message = "#{wanted} is missing - printing #{orientation} photos with no overlay until it is picked again"
-      Snappr.logger.warn message
-      warnings&.push({ kind: "overlay_missing", message: message })
+      Problem.warn(warnings, :overlay_missing, slot: "#{orientation} overlay",
+                                               file: wanted.basename, path: wanted,
+                                               orientation: orientation)
       nil
     end
 
     # The configured path for an orientation, whether or not the file exists, or
     # nil when the slot is empty.
     def configured_overlay_svg(orientation)
-      orientation = orientation.to_sym
-      raise Error, "unknown orientation: #{orientation}" unless ORIENTATIONS.include?(orientation)
-
+      orientation = orientation!(orientation)
       path = @data.fetch("overlay_svg", {})[orientation.to_s]
       path.to_s.empty? ? nil : resolve(path)
     end
@@ -78,11 +76,7 @@ module Snappr
     # Target width/height ratio of the print, with the long side following the
     # photo's own orientation.
     def print_ratio(orientation)
-      case orientation.to_sym
-      when :landscape then print_long_mm / print_short_mm
-      when :portrait then print_short_mm / print_long_mm
-      else raise Error, "unknown orientation: #{orientation}"
-      end
+      orientation!(orientation) == :landscape ? print_long_mm / print_short_mm : print_short_mm / print_long_mm
     end
 
     def png_compression = Integer(@data["png_compression"])
@@ -90,7 +84,9 @@ module Snappr
     # Fills whatever the overlay does not cover and the photo does not reach.
     def background_rgb
       hex = @data["background"].to_s.delete_prefix("#")
-      raise Error, "background must be a #rrggbb colour, got #{@data["background"].inspect}" unless /\A[0-9a-f]{6}\z/i.match?(hex)
+      unless /\A[0-9a-f]{6}\z/i.match?(hex)
+        raise Problem.new(:background_not_a_colour, value: @data["background"].inspect)
+      end
 
       hex.scan(/../).map { |pair| pair.to_i(16) }
     end
@@ -108,6 +104,15 @@ module Snappr
     def stability_timeout  = Float(@data.dig("stability", "timeout"))
 
     private
+
+    # There are exactly two orientations and they come from snappr's own code, so
+    # anything else is a bug in the caller rather than something an operator did.
+    # Deliberately terse for that reason - no operator will ever read it.
+    def orientation!(orientation)
+      orientation.to_sym.tap do |symbol|
+        raise Problem.new(:unknown_orientation, orientation: orientation) unless ORIENTATIONS.include?(symbol)
+      end
+    end
 
     # Relative paths belong to the project; absolute and ~ paths are taken as given.
     def resolve(path)

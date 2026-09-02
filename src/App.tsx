@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Flex, Grid } from "@radix-ui/themes";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Menu, type MenuOptions } from "@tauri-apps/api/menu";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { confirm, open } from "@tauri-apps/plugin-dialog";
@@ -11,7 +12,7 @@ import { Toolbar, baseName } from "./components/Toolbar";
 import { Stage } from "./components/Stage";
 import { Actions } from "./components/Actions";
 import { Filmstrip } from "./components/Filmstrip";
-import type { Orientation, Photo, View } from "./types";
+import type { Notice, Orientation, Photo, View } from "./types";
 
 export default function App() {
   const {
@@ -29,11 +30,77 @@ export default function App() {
   } = usePhotos();
   const [view, setView] = useState<View>("overlay");
   const [busy, setBusy] = useState<"share" | "print" | null>(null);
-  const [problem, setProblem] = useState<string | null>(null);
+  /**
+   * The last thing that went wrong with something the operator asked for.
+   *
+   * A level rather than a bare string because not everything here is a failure:
+   * a print that fell back to custom paper still printed, and amber says that
+   * where red would have the operator reaching for Try again.
+   */
+  const [problem, setProblem] = useState<Notice | null>(null);
   const [dragging, setDragging] = useState(false);
   const shareButton = useRef<HTMLButtonElement>(null);
   const contextMenu = useRef<Menu | null>(null);
   const now = useNow();
+
+  /**
+   * Whatever an invoke rejected with. Rust's `Err` strings are already the
+   * operator's half of the message - `src-tauri/src/problem.rs` is what
+   * guarantees it - so this is a level and a `String()`, not a translation.
+   */
+  const fail = useCallback((error: unknown) => setProblem({ level: "error", text: String(error) }), []);
+
+  /**
+   * Notices pushed from Rust rather than returned from a command, for an outcome
+   * discovered after the command had already returned. Today that is only
+   * `mac::print`'s main-thread closure - an unreadable print file, and the
+   * printer having no paper of the right size - both of which used to be logged
+   * and shown nowhere, so pressing Print did nothing visible at all.
+   */
+  useEffect(() => {
+    let cancelled = false;
+    let off: (() => void) | undefined;
+    listen<Notice>("notice", (event) => setProblem(event.payload)).then((stop) =>
+      cancelled ? stop() : (off = stop),
+    );
+    return () => {
+      cancelled = true;
+      off?.();
+    };
+  }, []);
+
+  /**
+   * A problem belongs to the photo it happened to. Without this a failed print's
+   * red line sits under whatever the operator selects next and reads as if *that*
+   * photo is broken.
+   *
+   * Only when the selection moves *between* photos, though. The first selection
+   * of the session arrives from `null` a moment after mount, and clearing on
+   * that would swallow the boot notice below before it had been read.
+   */
+  const lastSelected = useRef(selected);
+  useEffect(() => {
+    if (lastSelected.current !== null && lastSelected.current !== selected) setProblem(null);
+    lastSelected.current = selected;
+  }, [selected]);
+
+  /**
+   * The one-off that happened before the window existed - today only "your
+   * settings could not be read and have been reset". It arrives on the runtime
+   * status rather than as an event, because Tauri does not replay events and
+   * this is discovered in `.setup()`.
+   *
+   * Said once, and then it behaves like any other transient message: the next
+   * action or selection clears it. `said` is a ref rather than state so a later
+   * runtime update - the sidecar coming up, the watch failing - cannot bring it
+   * back after the operator has moved on.
+   */
+  const notified = useRef(false);
+  useEffect(() => {
+    if (!runtime.notice || notified.current) return;
+    notified.current = true;
+    setProblem({ level: "warning", text: runtime.notice });
+  }, [runtime.notice]);
 
   // File drops. The shell owns them (dragDropEnabled is on), so the webview never
   // sees the drop and Rust does the processing; this only paints the target while
@@ -105,7 +172,7 @@ export default function App() {
           await invoke("share_photo", { source: current.source, anchor });
         }
       } catch (error) {
-        setProblem(String(error));
+        fail(error);
       } finally {
         setBusy(null);
       }
@@ -176,7 +243,7 @@ export default function App() {
       try {
         await clearPhoto(photo.source);
       } catch (error) {
-        setProblem(String(error));
+        fail(error);
       }
     },
     [clearPhoto],
@@ -200,7 +267,7 @@ export default function App() {
     try {
       await clearAllPhotos();
     } catch (error) {
-      setProblem(String(error));
+      fail(error);
     }
   }, [ordered.length, clearAllPhotos]);
 
@@ -235,7 +302,31 @@ export default function App() {
 
   const pickWatchDir = async () => {
     const chosen = await open({ directory: true, multiple: false, defaultPath: settings?.watch_dir });
-    if (typeof chosen === "string") await changeWatchDir(chosen);
+    if (typeof chosen !== "string") return;
+    setProblem(null);
+    try {
+      await changeWatchDir(chosen);
+    } catch (error) {
+      fail(error);
+    }
+  };
+
+  // The toggle can fail - the folder may have gone since it was picked - and the
+  // shell puts the setting back when it does, so without the catch the switch
+  // snapped back to Paused with nothing anywhere saying why.
+  //
+  // In the failed state `watch_enabled` is still true: the operator asked for
+  // watching and it did not start. Toggling from that would *pause*, which is
+  // the opposite of the retry the pill offers - hence the explicit `true`.
+  const toggleWatching = async () => {
+    if (!settings) return;
+    setProblem(null);
+    const next = runtime.watch_error ? true : !settings.watch_enabled;
+    try {
+      await setWatching(next);
+    } catch (error) {
+      fail(error);
+    }
   };
 
   const overlayOf = (orientation: Orientation) =>
@@ -247,7 +338,7 @@ export default function App() {
       try {
         await changeOverlaySvg(orientation, path);
       } catch (error) {
-        setProblem(String(error));
+        fail(error);
       }
     },
     [changeOverlaySvg],
@@ -290,7 +381,7 @@ export default function App() {
 
   const reveal = () => {
     if (!current) return;
-    invoke("reveal_photo", { source: current.source }).catch((error) => setProblem(String(error)));
+    invoke("reveal_photo", { source: current.source }).catch((error) => fail(error));
   };
 
   return (
@@ -301,9 +392,10 @@ export default function App() {
         view={view}
         onView={setView}
         viewEnabled={ready}
-        onToggleWatching={() => settings && setWatching(!settings.watch_enabled)}
+        onToggleWatching={() => void toggleWatching()}
         onPickWatchDir={pickWatchDir}
         onOverlays={overlayMenu}
+        watchProblem={runtime.watch_error ?? null}
       />
 
       <Flex direction="column" minHeight="0">

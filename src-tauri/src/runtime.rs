@@ -26,6 +26,8 @@ use std::path::{Path, PathBuf};
 
 use tauri::{AppHandle, Manager};
 
+use crate::problem::{detail, Problem};
+
 #[derive(Debug, Clone)]
 pub struct Runtime {
     pub ruby: PathBuf,
@@ -60,10 +62,15 @@ impl Runtime {
     fn in_bundle(app: &AppHandle, snappr_root: PathBuf) -> Result<Self, String> {
         // Contents/MacOS/<binary> -> Contents
         let contents = std::env::current_exe()
-            .map_err(|e| format!("cannot locate the executable: {e}"))?
+            .map_err(|e| Problem::PipelineFilesLost { detail: detail(e) }.say())?
             .parent()
             .and_then(Path::parent)
-            .ok_or("the executable is not inside a bundle")?
+            .ok_or_else(|| {
+                Problem::PipelineFilesLost {
+                    detail: "the executable is not inside a bundle".into(),
+                }
+                .say()
+            })?
             .to_path_buf();
 
         let _ = app;
@@ -82,7 +89,12 @@ impl Runtime {
         // run from the tree it was built in.
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
-            .ok_or("cannot find the project root")?
+            .ok_or_else(|| {
+                Problem::PipelineFilesLost {
+                    detail: format!("no parent for CARGO_MANIFEST_DIR {}", env!("CARGO_MANIFEST_DIR")),
+                }
+                .say()
+            })?
             .to_path_buf();
 
         Ok(Self {
@@ -95,17 +107,18 @@ impl Runtime {
     }
 
     fn check(&self) -> Result<(), String> {
-        for (label, path) in [
+        // The labels are the console's half. The operator gets one sentence
+        // whichever piece is missing, because "the vendored gems" is not a
+        // distinction they can act on - and the Stage callout already carries
+        // the `mise run runtime` instruction as its own second line.
+        for (what, path) in [
             ("the Ruby interpreter", &self.ruby),
             ("the libvips directory", &self.vips),
             ("the vendored gems", &self.gem_setup),
             ("bin/snappr", &self.entrypoint),
         ] {
             if !path.exists() {
-                return Err(format!(
-                    "{label} is missing at {}. In development, run `mise run runtime` first.",
-                    path.display()
-                ));
+                return Err(Problem::PipelineNotInstalled { what, path }.say());
             }
         }
         Ok(())

@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
+use crate::problem::{detail, Problem};
+
 fn default_watch_dir() -> PathBuf {
     dirs_home().join("Downloads")
 }
@@ -140,31 +142,52 @@ impl Settings {
         let dir = app
             .path()
             .app_config_dir()
-            .map_err(|e| format!("cannot resolve the config directory: {e}"))?;
-        std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+            .map_err(|e| Problem::CannotSaveSettings { detail: detail(e) }.say())?;
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| Problem::CannotSaveSettings { detail: format!("{}: {e}", dir.display()) }.say())?;
         Ok(dir.join("settings.json"))
     }
 
     /// A missing or unreadable file is not an error: it just means defaults. A
     /// corrupt one is worth saying out loud, but still not worth refusing to start
     /// over - a kiosk that will not open because of a stray character is worse.
-    pub fn load(app: &AppHandle) -> Self {
+    ///
+    /// The sentence is handed back rather than raised from here, because this runs
+    /// in `.setup()` before the window exists. The caller owns the window and
+    /// decides when to say it.
+    pub fn load(app: &AppHandle) -> (Self, Option<String>) {
         let Ok(path) = Self::path(app) else {
-            return Self::default();
+            return (Self::default(), None);
         };
-        match std::fs::read_to_string(&path) {
-            Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|e| {
-                log::warn!("{} is not readable ({e}), falling back to defaults", path.display());
-                Self::default()
-            }),
-            Err(_) => Self::default(),
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            // No file at all is the ordinary first launch, and silent is right.
+            return (Self::default(), None);
+        };
+        match serde_json::from_str(&raw) {
+            Ok(settings) => (settings, None),
+            Err(e) => {
+                // Move it aside first. The next save() would otherwise overwrite
+                // it - and the watch toggle saves on its very first click - so
+                // without this the message announces a loss that is already
+                // unrecoverable. This is the one file snappr renames, and it is
+                // in snappr's own support folder, not the operator's.
+                let kept = path.with_extension("json.broken");
+                let note = match std::fs::rename(&path, &kept) {
+                    Ok(()) => format!("{e}; moved aside to {}", kept.display()),
+                    Err(rename) => format!("{e}; could not move it aside either: {rename}"),
+                };
+                let said = Problem::SettingsUnreadable { path: &path, detail: note }.warn();
+                (Self::default(), Some(said))
+            }
         }
     }
 
     pub fn save(&self, app: &AppHandle) -> Result<(), String> {
         let path = Self::path(app)?;
-        let raw = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(&path, raw).map_err(|e| format!("cannot write {}: {e}", path.display()))
+        let raw = serde_json::to_string_pretty(self)
+            .map_err(|e| Problem::CannotSaveSettings { detail: detail(e) }.say())?;
+        std::fs::write(&path, raw)
+            .map_err(|e| Problem::CannotSaveSettings { detail: format!("{}: {e}", path.display()) }.say())
     }
 
     /// The keys the pipeline actually reads. Deliberately not the whole struct:

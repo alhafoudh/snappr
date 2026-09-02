@@ -23,9 +23,18 @@ module Snappr
       when "overlay" then overlay(args)
       when "help", "-h", "--help" then puts USAGE
       else
-        warn "unknown command: #{command}\n\n#{USAGE}"
+        warn "#{Problem.new(:unknown_command, command: command).message}\n\n#{USAGE}"
         1
       end
+    # A Problem's message is already a sentence for whoever typed the command, so
+    # it is printed on its own. Ruby's default handler would put a backtrace on
+    # top of it, which reads as a crash rather than as "that folder does not
+    # exist". Anything else keeps its backtrace on purpose: that one is a bug in
+    # snappr and the trace is the useful part.
+    rescue Problem => e
+      warn e.message
+      Snappr.logger.debug e.detail if e.detail
+      1
     end
 
     private
@@ -42,7 +51,7 @@ module Snappr
 
     def overlay(paths)
       if paths.empty?
-        warn "overlay needs at least one path\n\n#{USAGE}"
+        warn "#{Problem.new(:no_paths_given).message}\n\n#{USAGE}"
         return 1
       end
 
@@ -57,7 +66,7 @@ module Snappr
         end
       rescue StandardError => e
         failed += 1
-        Snappr.logger.error "#{path}: #{e.class}: #{e.message}"
+        Snappr.logger.error Problem.log_line(e)
       end
       failed.zero? ? 0 : 1
     end

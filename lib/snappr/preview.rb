@@ -56,7 +56,7 @@ module Snappr
     def call(source:, destination:)
       source = Pathname.new(source)
       destination = Pathname.new(destination)
-      key = key_for(source)
+      key = key_for(source, destination)
       FileUtils.mkdir_p(@dir)
 
       { key: key,
@@ -70,13 +70,36 @@ module Snappr
     # Stable across runs so a restart can find the previews the index points at,
     # and keyed on mtime as well as path so replacing a photo with a different one
     # under the same name does not serve the old preview.
-    def key_for(source)
-      source = Pathname.new(source)
-      mtime = source.exist? ? source.mtime.to_i : 0
-      Digest::SHA256.hexdigest("#{source.expand_path}\0#{mtime}")[0, 16]
+    #
+    # **The composite is in the key too, and that is what stops the window showing
+    # yesterday's branding.** The UI draws these files through `asset://` URLs built
+    # straight out of these filenames, the responses carry no cache validators, and
+    # the page never reloads - so a URL the webview has already fetched comes back
+    # out of its own memory cache for the life of the session. Keyed on the source
+    # alone, clearing a photo from the strip, picking a different overlay and
+    # dropping the same file in again reproduced the identical key: byte-different
+    # JPEGs written to exactly the URLs the webview was already holding, so the
+    # operator kept seeing the overlay they had just replaced while the PNG on disk
+    # was the new one. Every composite now names its own files instead.
+    #
+    # The superseded set is deleted by the shell, which knows both the record that
+    # was there before and the one that replaced it - see `discard_superseded` in
+    # `src-tauri/src/lib.rs`. Ruby has no index and cannot tell an old preview of
+    # this photo from a current preview of another.
+    def key_for(source, destination)
+      Digest::SHA256.hexdigest("#{stamp(source)}\0#{stamp(destination)}")[0, 16]
     end
 
     private
+
+    # Path and mtime, to the nanosecond. Seconds are not enough: a retry straight
+    # after a failed composite can land inside the same second, and a key that
+    # cannot tell two composites apart is the whole thing this is here to avoid.
+    def stamp(path)
+      path = Pathname.new(path)
+      mtime = path.exist? ? path.mtime : nil
+      format("%s\0%d.%09d", path.expand_path, mtime&.to_i || 0, mtime&.nsec || 0)
+    end
 
     def write(from, key, kind, max_px)
       target = path_for(key, kind)

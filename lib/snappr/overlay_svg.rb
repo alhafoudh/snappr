@@ -30,10 +30,16 @@ module Snappr
       # Pass an array as `warnings` to collect anything worth showing an operator
       # as well as logging it. An out parameter rather than a changed return type,
       # so the callers that only want the image are untouched.
-      def render(svg_path, width, height, warnings: nil)
-        image = load_svg(stripped_source(svg_path, width, height))
+      #
+      # `slot` names the setting this file came from ("landscape overlay"), and is
+      # only ever used in the messages. This module knows nothing about
+      # orientations, but the operator's mental model is the Overlays menu they
+      # will go and fix it in, not a bare filename - so the caller that does know
+      # says which slot, and every message here can name it.
+      def render(svg_path, width, height, warnings: nil, slot: nil)
+        image = load_svg(stripped_source(svg_path, width, height, slot: slot))
         image = image.has_alpha? ? image : image.add_alpha
-        key_out_marker(image, svg_path, warnings)
+        key_out_marker(image, svg_path, warnings, slot)
       end
 
       # Where the photo goes, as fractions of the frame: { x:, y:, width:, height: }
@@ -43,53 +49,57 @@ module Snappr
       # Found by rendering and matching the colour, not by reading the rect's
       # geometry. Exporters wrap shapes in groups, transforms and clip paths, and
       # a rendered pixel is the one thing that accounts for all of them.
-      def photo_window(svg_path)
-        _, root = parse(svg_path)
-        reference = view_box(root, svg_path).split(/[\s,]+/).map(&:to_f)
+      def photo_window(svg_path, slot: nil)
+        _, root = parse(svg_path, slot)
+        reference = view_box(root, svg_path, slot).split(/[\s,]+/).map(&:to_f)
         width, height = reference[2].round, reference[3].round
 
-        image = load_svg(source_for(svg_path, width, height))
+        image = load_svg(source_for(svg_path, width, height, slot: slot))
         box = marker_bounds(image)
-        unless box
-          raise Error, "no #FF00FF photo window found in #{File.basename(svg_path)} - " \
-                       "draw a magenta rectangle where the photo should go"
-        end
+        raise Problem.new(:overlay_window_missing, **about(svg_path, slot)) unless box
 
         { x: box[:left].fdiv(width), y: box[:top].fdiv(height),
           width: box[:width].fdiv(width), height: box[:height].fdiv(height) }
       end
 
       # The aspect ratio the overlay was drawn at.
-      def aspect_ratio(svg_path)
-        _, root = parse(svg_path)
-        _, _, width, height = view_box(root, svg_path).split(/[\s,]+/).map(&:to_f)
+      def aspect_ratio(svg_path, slot: nil)
+        _, root = parse(svg_path, slot)
+        _, _, width, height = view_box(root, svg_path, slot).split(/[\s,]+/).map(&:to_f)
         height.zero? ? nil : width / height
       end
 
       # The document resized but otherwise untouched - marker included.
-      def source_for(svg_path, width, height)
-        document, root = parse(svg_path)
-        resize(root, svg_path, width, height)
+      def source_for(svg_path, width, height, slot: nil)
+        document, root = parse(svg_path, slot)
+        resize(root, svg_path, width, height, slot)
         document.to_s
       end
 
       # The document resized with every marker element removed.
-      def stripped_source(svg_path, width, height)
-        document, root = parse(svg_path)
-        resize(root, svg_path, width, height)
+      def stripped_source(svg_path, width, height, slot: nil)
+        document, root = parse(svg_path, slot)
+        resize(root, svg_path, width, height, slot)
         remove_marker_elements(root)
         document.to_s
       end
 
       private
 
+      # The arguments every overlay entry in the catalogue takes. `slot` is
+      # "landscape overlay" when the caller said which setting this file came
+      # from and plain "overlay" when it did not, so the sentences read the same
+      # either way; `file` is the basename the operator sees in the Overlays
+      # menu, and `path` is the full one, which only the console gets.
+      def about(svg_path, slot) = { slot: slot || "overlay", file: File.basename(svg_path), path: svg_path }
+
       def load_svg(source) = Vips::Image.new_from_buffer(source, "")
 
-      def resize(root, svg_path, width, height)
+      def resize(root, svg_path, width, height, slot)
         root.add_attributes(
           "width" => width.to_s,
           "height" => height.to_s,
-          "viewBox" => view_box(root, svg_path),
+          "viewBox" => view_box(root, svg_path, slot),
           # Fill the frame exactly. The canvas is derived from the print ratio, so
           # the only stretch is rounding residue. The default "meet" would
           # letterbox that residue and leave a transparent sliver along one edge.
@@ -117,14 +127,11 @@ module Snappr
       # Safety net for a marker whose colour arrives through something the
       # element walk cannot see - a CSS class, a gradient, a <use>. Better a
       # transparent hole than a magenta block on the print.
-      def key_out_marker(image, svg_path, warnings = nil)
+      def key_out_marker(image, svg_path, warnings = nil, slot = nil)
         mask = marker_mask(image)
         return image if mask.avg.zero?
 
-        message = "#{File.basename(svg_path)}: a #FF00FF marker survived removal, " \
-                  "keying it out - give it a plain fill attribute"
-        Snappr.logger.warn message
-        warnings&.push({ kind: "marker_survived", message: message })
+        Problem.warn(warnings, :marker_survived, **about(svg_path, slot))
         alpha = image.extract_band(3).boolean(mask.relational_const(:more, 128).ifthenelse(0, 255), :and)
         image.extract_band(0, n: 3).bandjoin(alpha)
       end
@@ -154,25 +161,23 @@ module Snappr
         mask.ifthenelse(255, 0)
       end
 
-      def parse(svg_path)
-        raise Error, "overlay svg not found: #{svg_path}" unless File.exist?(svg_path)
+      def parse(svg_path, slot = nil)
+        raise Problem.new(:overlay_file_missing, **about(svg_path, slot)) unless File.exist?(svg_path)
 
         document = REXML::Document.new(File.read(svg_path))
-        root = document.root or raise Error, "overlay svg has no root element: #{svg_path}"
+        root = document.root or raise Problem.new(:overlay_unreadable, **about(svg_path, slot))
         [document, root]
       end
 
       # Keep the authored viewBox. A file without one is using its width and
       # height as the coordinate system, so synthesise the equivalent.
-      def view_box(root, svg_path)
+      def view_box(root, svg_path, slot = nil)
         authored = root.attributes["viewBox"]
         return authored if authored && !authored.strip.empty?
 
         width = length(root.attributes["width"])
         height = length(root.attributes["height"])
-        unless width && height
-          raise Error, "overlay svg needs a viewBox, or a width and height in absolute units: #{svg_path}"
-        end
+        raise Problem.new(:overlay_no_size, **about(svg_path, slot)) unless width && height
 
         "0 0 #{width} #{height}"
       end

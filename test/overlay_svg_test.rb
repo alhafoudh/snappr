@@ -62,16 +62,21 @@ class OverlaySvgTest < Minitest::Test
   end
 
   def test_missing_svg_is_reported_clearly
-    error = assert_raises(Snappr::Error) { Snappr::OverlaySvg.render("/nope/absent.svg", 100, 100) }
-    assert_match(/overlay svg not found/, error.message)
+    error = assert_raises(Snappr::Problem) { Snappr::OverlaySvg.render("/nope/absent.svg", 100, 100) }
+    assert_equal :overlay_file_missing, error.code
+    assert_match(/absent\.svg/, error.message)
+    assert_match(%r{/nope/absent\.svg}, error.detail)
   end
 
   def test_an_unsizeable_svg_is_reported_clearly
     in_tmpdir do |dir|
       path = File.join(dir, "vague.svg")
       File.write(path, '<svg width="100%" height="100%" xmlns="http://www.w3.org/2000/svg"></svg>')
-      error = assert_raises(Snappr::Error) { Snappr::OverlaySvg.source_for(path, 100, 100) }
-      assert_match(/needs a viewBox/, error.message)
+      error = assert_raises(Snappr::Problem) { Snappr::OverlaySvg.source_for(path, 100, 100) }
+      assert_equal :overlay_no_size, error.code
+      # "viewBox" is the word for whoever wrote the exporter, not for the operator.
+      refute_match(/viewBox/, error.message)
+      assert_match(/viewBox/, error.detail)
     end
   end
 

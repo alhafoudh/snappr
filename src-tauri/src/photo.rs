@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Manager};
 
+use crate::problem::{detail, Problem};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
@@ -242,21 +244,23 @@ impl From<Stored> for (Vec<Photo>, Option<PathBuf>) {
 
 impl Index {
     pub fn path(app: &AppHandle) -> Result<PathBuf, String> {
-        let dir = app
-            .path()
-            .app_data_dir()
-            .map_err(|e| format!("cannot resolve the data directory: {e}"))?;
-        std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-        Ok(dir.join("index.json"))
+        Ok(Self::data_dir(app)?.join("index.json"))
     }
 
     pub fn preview_dir(app: &AppHandle) -> Result<PathBuf, String> {
+        let dir = Self::data_dir(app)?.join("previews");
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| Problem::CannotRememberPhotos { detail: format!("{}: {e}", dir.display()) }.say())?;
+        Ok(dir)
+    }
+
+    fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
         let dir = app
             .path()
             .app_data_dir()
-            .map_err(|e| format!("cannot resolve the data directory: {e}"))?
-            .join("previews");
-        std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+            .map_err(|e| Problem::CannotRememberPhotos { detail: detail(e) }.say())?;
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| Problem::CannotRememberPhotos { detail: format!("{}: {e}", dir.display()) }.say())?;
         Ok(dir)
     }
 
@@ -288,8 +292,10 @@ impl Index {
             photos: self.photos.clone(),
             selected: self.selected.clone(),
         };
-        let raw = serde_json::to_string_pretty(&stored).map_err(|e| e.to_string())?;
-        std::fs::write(&path, raw).map_err(|e| format!("cannot write {}: {e}", path.display()))
+        let raw = serde_json::to_string_pretty(&stored)
+            .map_err(|e| Problem::CannotRememberPhotos { detail: detail(e) }.say())?;
+        std::fs::write(&path, raw)
+            .map_err(|e| Problem::CannotRememberPhotos { detail: format!("{}: {e}", path.display()) }.say())
     }
 
     pub fn all(&self) -> &[Photo] {

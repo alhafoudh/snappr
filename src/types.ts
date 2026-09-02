@@ -73,9 +73,44 @@ export interface Settings {
   print_paper_name: string;
 }
 
+/**
+ * How loud a problem is. An error means the thing the operator asked for did not
+ * happen; a warning means it happened, differently.
+ */
+export type Level = "error" | "warning";
+
+/**
+ * A one-off message about something the operator just did.
+ *
+ * Carries only the sentence meant for them - the technical half was logged on the
+ * Rust or Ruby side and deliberately never crosses this boundary. See
+ * `src-tauri/src/problem.rs` and `lib/snappr/problem.rb`, which are the only two
+ * places either half is written.
+ */
+export interface Notice {
+  level: Level;
+  text: string;
+}
+
 export interface RuntimeStatus {
   ready: boolean;
+  /**
+   * The pipeline is unusable. Only ever set when `ready` is false, which is the
+   * only case `Stage` renders it - see the same note in `lib.rs`.
+   */
   error?: string;
+  /**
+   * Watching was asked for and did not start. Shown on the watch pill, which
+   * stays visible whatever the Stage is showing. Its own field rather than
+   * sharing `notice`, because the pill offers a retry and must only offer it
+   * when this is the reason.
+   */
+  watch_error?: string;
+  /**
+   * A one-off thing to say once, discovered before the window existed - today
+   * only "your settings could not be read". Shown on the info line on mount.
+   */
+  notice?: string;
 }
 
 /** Which side of the overlayed/original toggle is showing. */

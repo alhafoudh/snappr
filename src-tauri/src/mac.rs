@@ -27,7 +27,9 @@ use objc2_app_kit::{
     NSPrintPanelOptions, NSPrintingPaginationMode, NSSharingServicePicker, NSView, NSWindow,
 };
 use objc2_foundation::{NSArray, NSPoint, NSRect, NSRectEdge, NSSize, NSString, NSURL};
-use tauri::WebviewWindow;
+use tauri::{Manager, WebviewWindow};
+
+use crate::problem::{detail, Level, Problem};
 
 /// 100 x 148 mm in PostScript points (72 per inch).
 const SHORT_PT: f64 = 100.0 / 25.4 * 72.0;
@@ -53,10 +55,17 @@ pub struct Anchor {
 /// Shows the share sheet for `path`, anchored to the button that asked for it.
 pub fn share(window: &WebviewWindow, path: &Path, anchor: Anchor) -> Result<(), String> {
     let path = path.to_path_buf();
+    // The closure below runs after this function has already returned, so a
+    // problem it discovers cannot travel in the Err - it goes out as a notice.
+    let app = window.app_handle().clone();
     window
         .with_webview(move |webview| {
             let Some(mtm) = MainThreadMarker::new() else {
-                log::error!("share: not on the main thread");
+                Problem::WindowNotReady {
+                    what: "share sheet",
+                    detail: "with_webview did not run on the main thread".into(),
+                }
+                .notify(&app, Level::Error);
                 return;
             };
 
@@ -89,7 +98,7 @@ pub fn share(window: &WebviewWindow, path: &Path, anchor: Anchor) -> Result<(), 
             picker.showRelativeToRect_ofView_preferredEdge(rect, view, edge);
             PICKER.with(|slot| slot.borrow_mut().replace(picker));
         })
-        .map_err(|e| format!("cannot reach the webview: {e}"))
+        .map_err(|e| Problem::WindowNotReady { what: "share sheet", detail: detail(e) }.say())
 }
 
 /// Opens the print dialog for `path`, set up for the photo paper: the driver's
@@ -111,20 +120,29 @@ pub fn share(window: &WebviewWindow, path: &Path, anchor: Anchor) -> Result<(), 
 pub fn print(window: &WebviewWindow, path: &Path, landscape: bool, paper: &str) -> Result<(), String> {
     let path = path.to_path_buf();
     let paper = paper.to_string();
+    // Everything below the dispatch runs after this function has returned Ok, so
+    // it cannot report through the Err. Two things in there are worth telling the
+    // operator - an unreadable PNG and a paper the printer does not have - and
+    // both go out as notices instead.
+    let app = window.app_handle().clone();
     let ns_window = window
         .ns_window()
-        .map_err(|e| format!("cannot reach the window: {e}"))? as usize;
+        .map_err(|e| Problem::WindowNotReady { what: "print dialog", detail: detail(e) }.say())? as usize;
 
     window
         .run_on_main_thread(move || {
             let Some(mtm) = MainThreadMarker::new() else {
-                log::error!("print: not on the main thread");
+                Problem::WindowNotReady {
+                    what: "print dialog",
+                    detail: "run_on_main_thread did not run on the main thread".into(),
+                }
+                .notify(&app, Level::Error);
                 return;
             };
             let ns_window: &NSWindow = unsafe { &*(ns_window as *const NSWindow) };
 
             let Some(image) = NSImage::initWithContentsOfFile(NSImage::alloc(), &NSString::from_str(&path.display().to_string())) else {
-                log::error!("print: cannot read {}", path.display());
+                Problem::PrintUnreadable { path: &path }.notify(&app, Level::Error);
                 return;
             };
 
@@ -147,8 +165,13 @@ pub fn print(window: &WebviewWindow, path: &Path, landscape: bool, paper: &str) 
                 log::info!("print: using paper {paper} ({:.1} x {:.1} pt)", size.width, size.height);
             } else {
                 if !paper.is_empty() {
+                    // The operator can act on this right now: the panel below is
+                    // already forced to show Paper Size. It deliberately does not
+                    // name `paper` - that is a PPD keyword and pure jargon.
+                    Problem::PaperFallback.notify(&app, Level::Warning);
                     log::warn!(
-                        "print: this printer has no paper called {paper} (got {:.1} x {:.1} pt), falling back to a custom 100 x 148 mm - expect the driver's default margins",
+                        "print: no paper called {paper} on this printer (got {:.1} x {:.1} pt), \
+                         falling back to a custom 100 x 148 mm",
                         size.width, size.height
                     );
                 }
@@ -205,5 +228,5 @@ pub fn print(window: &WebviewWindow, path: &Path, landscape: bool, paper: &str) 
                 );
             }
         })
-        .map_err(|e| format!("cannot reach the main thread: {e}"))
+        .map_err(|e| Problem::WindowNotReady { what: "print dialog", detail: detail(e) }.say())
 }

@@ -9,17 +9,18 @@ require "zeitwerk"
 # loading process-wide and every overlay render fails with
 # "buffer is not in a known format". Unblock the one loader we need, by name,
 # rather than lifting the block wholesale: guest photos are semi-trusted input
-# and should keep the hardening, while share/overlay.svg is a committed asset.
+# and should keep the hardening, while the overlay is a file the operator picked.
 # This must run AFTER the require, or the gem re-blocks it.
 require "image_processing/vips"
 Vips.block("VipsForeignLoadSvg", false)
 
 module Snappr
+  # The base class, and the marker for "this message was written for the person
+  # holding the print". Almost everything raised is really a Snappr::Problem,
+  # which carries an operator sentence and a console detail from one catalogue -
+  # see lib/snappr/problem.rb. Error itself stays here, and bare, because it is
+  # referenced before Zeitwerk's loader is set up at the bottom of this file.
   class Error < StandardError; end
-
-  # Raised when a file never stops changing on disk. AirDrop writes
-  # non-atomically, so this means the transfer stalled rather than finished.
-  class UnstableFileError < Error; end
 
   class << self
     # SNAPPR_ROOT comes from mise's {{config_root}}, so paths resolve against

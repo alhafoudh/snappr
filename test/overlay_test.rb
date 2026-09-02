@@ -178,9 +178,14 @@ class OverlayTest < Minitest::Test
     config = test_config(landscape: "absolute.svg", portrait: "absolute.svg")
     in_tmpdir do |dir|
       source = write_fixture(dir, "flat.png", 1200, 900)
-      error = assert_raises(Snappr::Error) { Snappr::Overlay.new(config).call(source) }
-      assert_match(/no #FF00FF photo window found/, error.message)
-      assert_match(/magenta rectangle/, error.message)
+      error = assert_raises(Snappr::Problem) { Snappr::Overlay.new(config).call(source) }
+      # The code, not the wording: the sentence is meant to be edited freely, and
+      # the catalogue is what guarantees it has both an operator and a console
+      # half at all. The one thing worth pinning in the text is that it names
+      # which of the two slots to go and fix.
+      assert_equal :overlay_window_missing, error.code
+      assert_match(/landscape overlay/, error.message)
+      assert_match(%r{absolute\.svg}, error.detail)
     end
   end
 
@@ -313,8 +318,12 @@ class OverlayTest < Minitest::Test
   end
 
   def test_missing_source_is_reported_clearly
-    error = assert_raises(Snappr::Error) { @overlay.call("/nope/absent.jpg") }
-    assert_match(/no such file/, error.message)
+    error = assert_raises(Snappr::Problem) { @overlay.call("/nope/absent.jpg") }
+    assert_equal :photo_missing, error.code
+    # The name on screen, the full path only in the console half.
+    assert_match(/absent\.jpg/, error.message)
+    refute_match(%r{/nope/}, error.message)
+    assert_match(%r{/nope/absent\.jpg}, error.detail)
   end
 
   # --- no overlay ---
