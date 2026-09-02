@@ -690,12 +690,26 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
-        // Size and position only. A kiosk that was quit while minimised, maximised,
-        // fullscreen or hidden should still come back as a plain visible window at
-        // the frame the operator set up.
+        // The frame the operator set up, and nothing else: a window quit while
+        // hidden comes back visible, and decorations stay whatever the config says.
+        //
+        // MAXIMIZED and FULLSCREEN are in here for the *size*, not because a kiosk
+        // needs to reopen zoomed. macOS `isZoomed` is derived from the frame rather
+        // than from a gesture, so a window merely dragged out to fill the screen -
+        // the obvious kiosk setup - reports as maximized. The plugin then skips
+        // saving the size while still tracking every move, so the file ends up with
+        // the new position beside a stale size, and the window reopens small at the
+        // right place. Recording the two states is what makes the saved frame
+        // coherent again: size and position come back as the pre-zoom pair the
+        // plugin actually kept, and the zoom is reapplied over them.
         .plugin(
             tauri_plugin_window_state::Builder::default()
-                .with_state_flags(StateFlags::SIZE | StateFlags::POSITION)
+                .with_state_flags(
+                    StateFlags::SIZE
+                        | StateFlags::POSITION
+                        | StateFlags::MAXIMIZED
+                        | StateFlags::FULLSCREEN,
+                )
                 .build(),
         )
         .plugin(tauri_plugin_dialog::init())
