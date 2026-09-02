@@ -14,7 +14,7 @@
 //! in one of those, and only inert data may go in `Resources`:
 //!
 //! ```text
-//! snappr.app/Contents/
+//! Snappr.app/Contents/
 //!   MacOS/ruby            the interpreter          (externalBin)      PLANNED
 //!   Frameworks/*.dylib    libvips and its closure  (macOS.frameworks) PLANNED
 //!   lib/ruby/             the Ruby stdlib          (macOS.files)      PLANNED
@@ -57,10 +57,13 @@ impl Runtime {
     pub fn detect(app: &AppHandle) -> Result<Self, String> {
         // `is_dir`, never `exists`. Under `tauri dev` the resource directory is
         // `src-tauri/target/debug`, which already contains a *file* called
-        // `snappr` - the binary itself. `exists` would therefore be true in
-        // development, sending every dev run down the bundle branch to look for
-        // `Contents/MacOS/ruby`, and the resulting failure reads as a broken Ruby
-        // runtime rather than as a path bug. This one word is the whole guard.
+        // `Snappr` - the binary itself, named by the `[[bin]]` target in
+        // `Cargo.toml` - and the disk is case-insensitive, so the probe below
+        // matches it whatever the case.
+        // `exists` would therefore be true in development, sending every dev run
+        // down the bundle branch to look for `Contents/MacOS/ruby`, and the
+        // resulting failure reads as a broken Ruby runtime rather than as a path
+        // bug. This one word is the whole guard.
         let bundled = app
             .path()
             .resource_dir()

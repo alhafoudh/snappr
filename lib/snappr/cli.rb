@@ -16,7 +16,7 @@ module Snappr
     def call(argv)
       command, *args = argv
       case command
-      # serve, not watch, is the default: inside snappr.app this is spawned as a
+      # serve, not watch, is the default: inside Snappr.app this is spawned as a
       # sidecar with no arguments, and the app owns the watching.
       when nil, "serve" then serve
       when "watch" then watch

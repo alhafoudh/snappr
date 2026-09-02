@@ -117,7 +117,7 @@ impl Problem<'_> {
                 Some(format!("the sidecar has no {what}")),
             ),
             PipelineNotResponding { detail } => (
-                "Snappr's image tools have stopped responding. Restart snappr.".into(),
+                "Snappr's image tools have stopped responding. Restart Snappr.".into(),
                 Some(detail.clone()),
             ),
             PipelineTimedOut { secs } => (
@@ -132,19 +132,19 @@ impl Problem<'_> {
             // The path is the fact in both of these: the operator picked this
             // folder and has to go and look at it.
             NotAFolder { path } => (
-                format!("{} is not a folder, so snappr cannot watch it.", name_of(path)),
+                format!("{} is not a folder, so Snappr cannot watch it.", name_of(path)),
                 Some(path.display().to_string()),
             ),
             CannotWatch { path, detail } => (
                 format!(
-                    "Snappr cannot watch {}. Check the folder still exists and that snappr \
+                    "Snappr cannot watch {}. Check the folder still exists and that Snappr \
                      is allowed to read it.",
                     name_of(path)
                 ),
                 Some(format!("{}: {detail}", path.display())),
             ),
             TransferStalled { file, path, secs } => (
-                format!("{file} never finished arriving, so snappr skipped it. AirDrop it again."),
+                format!("{file} never finished arriving, so Snappr skipped it. AirDrop it again."),
                 Some(format!("size and mtime never settled within {secs}s: {}", path.display())),
             ),
 
@@ -172,7 +172,7 @@ impl Problem<'_> {
             // extension belongs in the console half, where it is diagnostic.
             OverlayNotADrawing { file, path } => (
                 format!(
-                    "{file} is not a drawing snappr can use as an overlay. Export the \
+                    "{file} is not a drawing Snappr can use as an overlay. Export the \
                      design from your tool as an SVG and add that instead."
                 ),
                 Some(path.display().to_string()),
@@ -210,7 +210,7 @@ impl Problem<'_> {
             // and pure jargon. The advice is actionable right now, because the
             // print panel is already showing Paper Size.
             PaperFallback => (
-                "This printer does not have the photo paper snappr expects, so the print \
+                "This printer does not have the photo paper Snappr expects, so the print \
                  may come out with a white border. Check Paper Size in the print dialog."
                     .into(),
                 None,
@@ -225,7 +225,7 @@ impl Problem<'_> {
             ),
 
             DropAlreadyAPrint { file } => (
-                format!("{file} is a print snappr already made. Drop the original photo instead."),
+                format!("{file} is a print Snappr already made. Drop the original photo instead."),
                 None,
             ),
             DropIsAFolder { file } => (

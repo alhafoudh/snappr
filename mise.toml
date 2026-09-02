@@ -20,7 +20,7 @@ run = "bundle exec bin/snappr overlay"
 description = "unit tests"
 run = "bundle exec ruby -Ilib -Itest -e 'Dir[\"test/**/*_test.rb\"].each { |f| require File.expand_path(f) }'"
 
-# The bundled runtime that ships inside snappr.app. Everything below writes only
+# The bundled runtime that ships inside Snappr.app. Everything below writes only
 # into build/, which is gitignored - these scripts are the source of truth, not
 # their output. Run `mise run runtime` for the lot; the individual tasks are for
 # iterating on one stage.

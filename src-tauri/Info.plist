@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<!--
-	Merged by Tauri into the bundled snappr.app's Info.plist (and into the plist
+	Merged by Tauri into the bundled Snappr.app's Info.plist (and into the plist
 	embedded in the development binary). Without CFBundleDocumentTypes macOS has no
 	reason to hand snappr a file: the Dock shows the not-allowed cursor and
 	RunEvent::Opened never fires. Types are declared by UTI, which is what Launch

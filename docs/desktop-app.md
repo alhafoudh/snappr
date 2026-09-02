@@ -28,7 +28,7 @@ of the shell is going the wrong way.
 ## The sidecar
 
 The Ruby child is `bin/snappr serve`, spawned by `Sidecar::start`. `serve` is also
-the **default subcommand**, because inside `snappr.app` the binary is invoked bare
+the **default subcommand**, because inside `Snappr.app` the binary is invoked bare
 with no arguments - see `cli.rb`. Changing that default breaks the packaged app.
 
 **Newline-delimited JSON on stdin and stdout, one request at a time.** The frame

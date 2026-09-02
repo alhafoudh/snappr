@@ -43,12 +43,12 @@ module Snappr
         detail: "%{path} does not exist"
       },
       overlay_unreadable: {
-        ui: "The %{slot} %{file} is empty, or is not a drawing snappr can read. " \
+        ui: "The %{slot} %{file} is empty, or is not a drawing Snappr can read. " \
             "Export it again from your design tool.",
         detail: "%{path} parsed but has no root element"
       },
       overlay_no_size: {
-        ui: "The %{slot} %{file} does not say what size it was drawn at, so snappr " \
+        ui: "The %{slot} %{file} does not say what size it was drawn at, so Snappr " \
             "cannot scale it. Export it again from your design tool - most tools " \
             "write the size automatically.",
         detail: "%{path} has no viewBox and no absolute width/height"
@@ -76,7 +76,7 @@ module Snappr
       },
       marker_survived: {
         ui: "The photo area in the %{slot} %{file} could not be removed cleanly, so " \
-            "snappr hid it instead. In your design tool, give that magenta shape a " \
+            "Snappr hid it instead. In your design tool, give that magenta shape a " \
             "plain fill colour.",
         detail: "marker pixels survived the element walk in %{path}, keyed out on alpha"
       },
@@ -88,12 +88,12 @@ module Snappr
         detail: "%{path} is not a file"
       },
       transfer_stalled: {
-        ui: "%{file} never finished arriving, so snappr skipped it. AirDrop it again.",
+        ui: "%{file} never finished arriving, so Snappr skipped it. AirDrop it again.",
         detail: "size and mtime never settled within %{timeout}s: %{path}"
       },
       photo_unusable: {
         ui: "Snappr could not make a print from this photo. It may be damaged, or in " \
-            "a format snappr cannot read.",
+            "a format Snappr cannot read.",
         detail: "%{error}"
       },
       profile_unusable: {
@@ -111,7 +111,7 @@ module Snappr
         # The path *is* the fact here, so it stays on screen. That is the rule:
         # a path appears when the operator has to go and look at it, not as
         # decoration on a sentence that already reads without it.
-        ui: "The folder snappr was told to watch does not exist: %{path}",
+        ui: "The folder Snappr was told to watch does not exist: %{path}",
         detail: nil
       },
       background_not_a_colour: {
@@ -150,7 +150,7 @@ module Snappr
         detail: nil
       },
       no_paths_given: {
-        ui: "Tell snappr which photos to overlay, for example:\n" \
+        ui: "Tell Snappr which photos to overlay, for example:\n" \
             "  snappr overlay ~/Downloads/IMG_1234.heic",
         detail: nil
       }

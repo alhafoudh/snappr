@@ -1,6 +1,6 @@
 # The bundled runtime
 
-`snappr.app` ships its own Ruby and its own libvips, so it runs on an operator's
+`Snappr.app` ships its own Ruby and its own libvips, so it runs on an operator's
 Mac that has never heard of Homebrew. `mise run runtime` builds the lot into
 `build/`, which is gitignored - **the scripts are the source of truth, not their
 output.**

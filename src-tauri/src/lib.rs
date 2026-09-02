@@ -307,7 +307,7 @@ fn refusal_problem<'a>(path: &'a Path, refusal: Refusal, accepted: &str) -> Prob
             kind: path
                 .extension()
                 .map(|e| format!("a .{} file", e.to_string_lossy()))
-                .unwrap_or_else(|| "not a kind of file snappr knows".into()),
+                .unwrap_or_else(|| "not a kind of file Snappr knows".into()),
             file,
             accepted: accepted.to_string(),
         },

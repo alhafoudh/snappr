@@ -6,6 +6,19 @@ authors = ["Freevision s.r.o."]
 edition = "2021"
 rust-version = "1.77.2"
 
+# Capital S, and it has to be here rather than in `tauri.conf.json`. macOS takes a
+# process's name - the Dock hover label and the CMD+Tab picker - from the path it
+# was exec'd from, and `tauri dev` runs `cargo run`, which execs the *Cargo target*.
+# `productName` names the bundle and `mainBinaryName` renames the binary while
+# bundling, so neither is in play under `tauri dev`: with the target left to default
+# to the package name, every development run showed up as `snappr` while the window
+# title and the built `Snappr.app` were already correct. Naming the target is what
+# covers both modes, and `mainBinaryName` is then unnecessary - Tauri takes the
+# executable's name from here.
+[[bin]]
+name = "Snappr"
+path = "src/main.rs"
+
 [lib]
 # The binary is a thin shell over this so the same code can be driven from tests
 # and, later, from the headless subcommands.

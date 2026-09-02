@@ -31,7 +31,7 @@ already made untrue.
 |---|---|
 | `CLAUDE.md` | the pipeline, the print, and every invariant protecting the photo |
 | `docs/desktop-app.md` | the Rust shell, the React UI, the sidecar, settings, drops |
-| `docs/bundled-runtime.md` | the Ruby and libvips that ship inside `snappr.app` |
+| `docs/bundled-runtime.md` | the Ruby and libvips that ship inside `Snappr.app` |
 
 A fourth rule outranks all three: **prefer a comment at the site over a paragraph
 here.** Most of this codebase argues its own decisions where they live, with the
@@ -80,7 +80,7 @@ mise run setup            bundle install
 mise run watch            watch the drop folder and overlay each photo that lands
 mise run overlay PATH     overlay the given photos now, then open them
 mise run test             unit tests
-mise run runtime          build the Ruby and libvips that ship inside snappr.app
+mise run runtime          build the Ruby and libvips that ship inside Snappr.app
 ```
 
 `mise run runtime` and the five `runtime-*` tasks behind it are
