@@ -2,6 +2,7 @@ import { Box, Button, Card, Flex, RadioCards, ScrollArea, Separator, Skeleton, T
 import { DotFilledIcon, FileIcon } from "@radix-ui/react-icons";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
+import { OrientationIcon } from "./OrientationIcon";
 import { baseName } from "../naming";
 import type { Photo, RuntimeStatus, Settings } from "../types";
 
@@ -11,6 +12,9 @@ const FRAME_HEIGHT = "84px";
 /**
  * contain, not cover: a portrait thumb reads as portrait at a glance, which is
  * the one thing the operator most wants to know before it prints.
+ *
+ * The glyph in the frame's corner is the explicit answer now; this is what keeps
+ * the picture agreeing with it, rather than filling the cell either way.
  */
 const thumb = { width: "100%", height: "100%", objectFit: "contain", display: "block" } as const;
 
@@ -43,6 +47,18 @@ function Cell({ photo, onMenu }: { photo: Photo; onMenu: (event: React.MouseEven
               <Skeleton loading={photo.status === "processing"} height="100%" width="100%">
                 <Box height="100%" />
               </Skeleton>
+            )}
+            {/* Which crop the photo landed in, in the corner the status dot does
+                not own. The word is in the label and not on the cell: "Landscape"
+                at size 1 is most of a 132px cell, and the filename would have
+                nothing left. The full sentence is on the info line under the
+                photo, which is where there is room for it. */}
+            {photo.orientation && (
+              <Box position="absolute" top="0" left="0">
+                <Text as="span" color="gray" aria-label={`${photo.orientation} photo`}>
+                  <OrientationIcon orientation={photo.orientation} size={12} />
+                </Text>
+              </Box>
             )}
             {status && (
               <Box position="absolute" top="0" right="0">

@@ -19,6 +19,7 @@ import {
 } from "@radix-ui/react-icons";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
+import { OrientationIcon } from "./OrientationIcon";
 import type { OverlayCard, Orientation, Settings } from "../types";
 
 /**
@@ -70,27 +71,10 @@ const verticalLabel = {
  * `aria-pressed` is the honest control; `gap="1"` and matching sizes are what make
  * them read as one segmented pair.
  *
- * The icons are the two paper shapes, drawn rather than imported: the icon set has
- * no landscape/portrait pair, and two rectangles say it better than any glyph.
+ * The icons are `OrientationIcon`, which is also what the info line and the
+ * filmstrip cell draw - the panel is where they were drawn first, not where they
+ * belong.
  */
-function Shape({ orientation }: { orientation: Orientation }) {
-  const [width, height] = orientation === "landscape" ? [14, 10] : [10, 14];
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden focusable="false">
-      <rect
-        x={(16 - width) / 2}
-        y={(16 - height) / 2}
-        width={width}
-        height={height}
-        rx="1.5"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.3"
-      />
-    </svg>
-  );
-}
-
 function Toggles({
   card,
   onToggle,
@@ -125,7 +109,7 @@ function Toggles({
             aria-label={`${card.name} for ${orientation} photos`}
             onClick={() => onToggle(orientation, !on)}
           >
-            <Shape orientation={orientation} />
+            <OrientationIcon orientation={orientation} />
           </IconButton>
         </Tooltip>
       ))}
@@ -252,7 +236,7 @@ export function OverlayPanel({
                 content={card ? `${orientation}: ${card.name}` : `${orientation}: no overlay`}
               >
                 <Text as="span" color={card ? "blue" : "gray"} aria-label={`${orientation} overlay`}>
-                  <Shape orientation={orientation} />
+                  <OrientationIcon orientation={orientation} />
                 </Text>
               </Tooltip>
             );

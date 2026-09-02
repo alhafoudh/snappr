@@ -2,6 +2,7 @@ import { forwardRef } from "react";
 import { Box, Button, Flex, Kbd, SegmentedControl, Text, Tooltip } from "@radix-ui/themes";
 import { MagnifyingGlassIcon, ReloadIcon, Share1Icon } from "@radix-ui/react-icons";
 
+import { OrientationIcon, orientationLabel } from "./OrientationIcon";
 import type { Exif, Level, Notice, Photo, View } from "../types";
 import { relativeTime } from "../relativeTime";
 
@@ -97,6 +98,31 @@ function NoticeLine({ level, text, full }: { level: Level; text: string; full?: 
 }
 
 /**
+ * Which of the two crops the photo landed in, and so which overlay was composited
+ * over it and which way it was cropped.
+ *
+ * `Photo.orientation` is geometric and measured after `autorot`, never the EXIF
+ * `Orientation` tag - it is the same answer `Overlay#orientation_of` used to pick
+ * the overlay, which is what makes it worth printing rather than deriving from the
+ * dimensions here. Absent until the photo completes, like every other fact on this
+ * line, so a queued or failed photo just drops the group.
+ *
+ * It leads the print facts rather than joining the camera groups above them, and
+ * there is deliberately no `·` after it: it qualifies the dimensions it precedes.
+ * The icon is 12px rather than its default 16 because the line is `Text size="1"`,
+ * and a 16px glyph would set the row's line height.
+ */
+function OrientationGroup({ photo }: { photo: Photo }) {
+  if (!photo.orientation) return null;
+  return (
+    <>
+      <OrientationIcon orientation={photo.orientation} size={12} />
+      {` ${orientationLabel(photo.orientation)} `}
+    </>
+  );
+}
+
+/**
  * The information line under the photo, in priority order: what went wrong with
  * the photo, then what went wrong with the last thing the operator asked for,
  * then the facts about the print that is about to be made.
@@ -141,6 +167,7 @@ function Info({ current, ready, problem, now }: { current: Photo | null; ready: 
         {taken !== null && <Text size="1">Taken {new Date(taken * 1000).toLocaleString()}</Text>}
         <Text size="1">Added {added.toLocaleString()}</Text>
         <Text size="1">
+          <OrientationGroup photo={current} />
           {current.output_width} x {current.output_height} px, {current.depth}-bit
           {current.bytes ? `, ${(current.bytes / 1024 / 1024).toFixed(1)} MB` : ""}
         </Text>
@@ -151,6 +178,7 @@ function Info({ current, ready, problem, now }: { current: Photo | null; ready: 
       <Tooltip content={detail}>
         <Text size="1" color="gray" truncate>
           {groups.map((group) => `${group} · `).join("")}
+          <OrientationGroup photo={current} />
           {current.output_width} x {current.output_height} px, {current.depth}-bit
           {current.bytes ? `, ${(current.bytes / 1024 / 1024).toFixed(1)} MB` : ""}
           {", added "}

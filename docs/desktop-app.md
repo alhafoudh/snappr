@@ -588,6 +588,17 @@ the two deliberately kept off the line - the 35mm equivalent and the exact clock
 times. The `<time>` element inside it carries no `title` of its own: a native
 tooltip underneath a Radix one races it and wins.
 
+**The line names the orientation beside the pixel count**, as `▭ Landscape 4032 x
+2724 px`, and the filmstrip cell carries the same glyph in the corner the status
+dot does not use. It is `Photo.orientation`, which is geometric and measured after
+`autorot` rather than the EXIF `Orientation` tag - so it is the answer that
+actually picked the crop and the overlay, which is why it is printed rather than
+derived from the two numbers next to it. The cell gets the glyph without the word:
+"Landscape" at `size="1"` is most of a 132px cell and the filename would have
+nothing left, so the word lives in the cell's `aria-label` and on this line.
+`OrientationIcon` is shared with the overlay panel's toggles, so an orientation
+looks like one thing wherever the app says it.
+
 **The titlebar drag region is `data-tauri-drag-region="deep"`.** Tauri's
 `drag.js` treats the bare attribute as "only direct clicks on this element", so a
 wrapper element between the header and the pointer silently stops the window
