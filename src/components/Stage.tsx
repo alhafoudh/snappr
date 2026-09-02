@@ -1,4 +1,4 @@
-import { Box, Button, Callout, Code, Flex, Spinner, Text } from "@radix-ui/themes";
+import { Box, Button, Callout, Flex, Spinner, Text } from "@radix-ui/themes";
 import { ExclamationTriangleIcon, ImageIcon } from "@radix-ui/react-icons";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
@@ -68,15 +68,13 @@ export function Stage({
             <Callout.Icon>
               <ExclamationTriangleIcon />
             </Callout.Icon>
+            {/* The sentence and nothing else. This used to carry a second line
+                telling the reader to run `mise run runtime`, which is the fix on
+                a developer's machine and nonsense in a shipped app, where the
+                runtime is bundled and there is no repo to run it in. The missing
+                piece and its full path are on stderr already - see
+                Runtime::check - so the developer lost nothing. */}
             <Callout.Text>{runtime.error}</Callout.Text>
-            {/* The one piece of developer instruction the operator's window
-                carries, and it stays: it is genuinely the fix, there is nobody
-                else to tell, and at size="1" underneath the sentence it reads
-                as the small print it is. The Rust side deliberately does not
-                repeat it - see Runtime::check. */}
-            <Callout.Text size="1">
-              Run <Code>mise run runtime</Code> and restart the app.
-            </Callout.Text>
           </Callout.Root>
         );
       }

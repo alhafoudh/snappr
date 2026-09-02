@@ -46,9 +46,12 @@ pub struct Notice {
 }
 
 pub enum Problem<'a> {
-    // --- Startup. All of these end up in the red Stage callout, which already
-    // carries the `mise run runtime` hint as its own second line - so none of
-    // them repeats it.
+    // --- Startup. All of these end up in the red Stage callout, which carries
+    // the operator's sentence and nothing else. It used to add `mise run
+    // runtime` underneath, and that line is gone: it is the fix on a developer's
+    // machine and nonsense in a shipped app. So none of these arms may name a
+    // shell command either - the operator's half never does, and the console
+    // half below already says which piece is missing and where.
     PipelineNotInstalled { what: &'a str, path: &'a Path },
     PipelineFilesLost { detail: String },
     PipelineWontStart { detail: String },
@@ -101,7 +104,7 @@ impl Problem<'_> {
         use Problem::*;
         match self {
             PipelineNotInstalled { what, path } => (
-                "Snappr's image tools are not installed.".into(),
+                "Snappr's image tools are not installed. Reinstall Snappr.".into(),
                 Some(format!("{what} is missing at {}", path.display())),
             ),
             PipelineFilesLost { detail } => (

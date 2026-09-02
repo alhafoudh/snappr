@@ -129,8 +129,9 @@ impl Runtime {
     fn check(&self) -> Result<(), String> {
         // The labels are the console's half. The operator gets one sentence
         // whichever piece is missing, because "the vendored gems" is not a
-        // distinction they can act on - and the Stage callout already carries
-        // the `mise run runtime` instruction as its own second line.
+        // distinction they can act on. The label and the path are how a
+        // developer tells which stage of `mise run runtime` has not been run -
+        // that is the whole of it now, since the window no longer says so.
         for (what, path) in [
             ("the Ruby interpreter", &self.ruby),
             ("the libvips directory", &self.vips),
