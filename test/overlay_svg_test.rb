@@ -122,12 +122,44 @@ class OverlaySvgTest < Minitest::Test
     end
   end
 
+  # --- the one overlay that actually ships ---
+  #
+  # `sample/overlay-landscape.svg` goes into the app bundle and is what a fresh
+  # install composites, so it earns more scrutiny than the test material in
+  # `share/` - a redraw that broke any of this would ship.
+
+  def test_the_shipped_sample_is_drawn_at_the_landscape_print_ratio
+    assert_path_exists shipped_sample, "the app bundles this file; it has to be there"
+    assert_in_delta committed_config.print_ratio(:landscape),
+                    Snappr::OverlaySvg.aspect_ratio(shipped_sample), 0.01,
+                    "the sample must be drawn at the paper's ratio or it prints stretched"
+  end
+
+  # The sample is a watermark: its marker covers the whole frame, so the photo
+  # fills the print and the wordmark sits on top of it. That is what makes it a
+  # useful worked example - and a redraw that inset the window would silently turn
+  # every default print into a bordered one.
+  def test_the_shipped_sample_window_is_the_whole_frame
+    window = Snappr::OverlaySvg.photo_window(shipped_sample)
+    assert_equal({ x: 0.0, y: 0.0, width: 1.0, height: 1.0 }, window)
+  end
+
+  def test_the_shipped_sample_hides_its_marker_and_leaves_the_photo_visible
+    image = Snappr::OverlaySvg.render(shipped_sample, 1480, 1000)
+
+    assert_equal 0, marker_pixels(image), "the marker must never be rendered"
+    # A watermark, so nearly all of the frame is clear and the artwork is a corner
+    # of it. Loose bounds: this is asserting "wordmark", not a particular design.
+    opaque = (image.extract_band(3).relational_const(:moreeq, 128).avg / 255.0)
+    assert_operator opaque, :<, 0.2, "the sample must leave the photo showing"
+    assert_operator opaque, :>, 0.0001, "the sample must actually draw something"
+  end
+
   private
 
-  # The sample overlays config/snappr.yml names, which is the only place any are
-  # named now - the app ships none and picks them at runtime. An orientation may
-  # legitimately have no file, so only the ones that exist are held to these
-  # properties.
+  # The overlays config/snappr.yml names - test material in share/, not anything
+  # the app ships. An orientation may legitimately have no file, so only the ones
+  # that exist are held to these properties.
   def committed_overlays
     config = committed_config
     Snappr::Config::ORIENTATIONS.filter_map do |orientation|

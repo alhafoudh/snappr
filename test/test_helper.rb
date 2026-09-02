@@ -133,11 +133,16 @@ module Snappr
 
     def fixture(name) = File.join(FIXTURES, name)
 
-    # config/snappr.yml as the CLI reads it, which is where the sample overlays in
+    # config/snappr.yml as the CLI reads it, which is where the test overlays in
     # share/ are named. Loaded fresh rather than taken from `Snappr.config`:
     # that global is process-wide and `Server#hello` reassigns it, so a test that
     # read it would pass or fail depending on what ran before it.
     def committed_config = Snappr::Config.load
+
+    # The one overlay snappr actually ships, which the desktop app resolves out of
+    # its resource directory and hands to the pipeline as a path. Nothing in Ruby
+    # knows about it - hence the literal path rather than a config lookup.
+    def shipped_sample = Snappr.root.join("sample/overlay-landscape.svg")
 
     # A config pointing at fixture overlays, so tests do not depend on whatever
     # branding happens to be committed.

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
-import type { Orientation, Photo, RuntimeStatus, Settings } from "./types";
+import type { Orientation, Overlay, Photo, RuntimeStatus, Settings } from "./types";
 
 /**
  * The whole of the app's state.
@@ -136,11 +136,11 @@ export function usePhotos() {
     setSettings(await invoke<Settings>("set_watch_dir", { dir }));
   }, []);
 
-  // `null` clears the slot, which means no overlay for that orientation rather
-  // than a fallback to anything. Rust re-handshakes the sidecar, so the next
-  // photo uses it; the ones already in the strip are left alone.
-  const changeOverlaySvg = useCallback(async (orientation: Orientation, path: string | null) => {
-    setSettings(await invoke<Settings>("set_overlay_svg", { orientation, path }));
+  // The sample, a picked SVG, or nothing - all three are real settings. Rust
+  // re-handshakes the sidecar, so the next photo uses it; the ones already in the
+  // strip keep the output they have.
+  const changeOverlay = useCallback(async (orientation: Orientation, choice: Overlay) => {
+    setSettings(await invoke<Settings>("set_overlay", { orientation, choice }));
   }, []);
 
   const setWatching = useCallback(async (enabled: boolean) => {
@@ -167,7 +167,7 @@ export function usePhotos() {
     clearPhoto,
     clearAllPhotos,
     changeWatchDir,
-    changeOverlaySvg,
+    changeOverlay,
     setWatching,
   };
 }

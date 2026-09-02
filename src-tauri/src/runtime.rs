@@ -15,11 +15,22 @@
 //!
 //! ```text
 //! snappr.app/Contents/
-//!   MacOS/ruby            the interpreter          (externalBin)
-//!   Frameworks/*.dylib    libvips and its closure  (macOS.frameworks)
-//!   lib/ruby/             the Ruby stdlib          (macOS.files, inert)
-//!   Resources/snappr/     lib, share, config, gems (resources, inert)
+//!   MacOS/ruby            the interpreter          (externalBin)      PLANNED
+//!   Frameworks/*.dylib    libvips and its closure  (macOS.frameworks) PLANNED
+//!   lib/ruby/             the Ruby stdlib          (macOS.files)      PLANNED
+//!   Resources/snappr/     lib, config, gems        (resources)        PLANNED
+//!   Resources/sample/     the sample overlay       (resources)        WIRED
 //! ```
+//!
+//! **Only the last line is real.** `bundle.resources` names `sample/` and nothing
+//! else, so `Resources/snappr` never exists, `detect` always takes the development
+//! branch, and `in_bundle` below has never run. Do not plan against it as if it
+//! had. Note `share/` is deliberately absent from that list even as intent: it is
+//! test material and must never ship.
+//!
+//! The sample is looked up separately, through `BaseDirectory::Resource` in
+//! `settings.rs`, precisely so it does not depend on any of the PLANNED lines - an
+//! app whose Ruby runtime is not built can still reveal an SVG.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -44,6 +55,12 @@ pub struct Runtime {
 
 impl Runtime {
     pub fn detect(app: &AppHandle) -> Result<Self, String> {
+        // `is_dir`, never `exists`. Under `tauri dev` the resource directory is
+        // `src-tauri/target/debug`, which already contains a *file* called
+        // `snappr` - the binary itself. `exists` would therefore be true in
+        // development, sending every dev run down the bundle branch to look for
+        // `Contents/MacOS/ruby`, and the resulting failure reads as a broken Ruby
+        // runtime rather than as a path bug. This one word is the whole guard.
         let bundled = app
             .path()
             .resource_dir()

@@ -99,15 +99,30 @@ hour.
 handling and dismissal right for nothing.
 
 **The Overlays button is one button, not two**, and it opens a native menu with a
-submenu per orientation ("Choose..." / "Clear"). The bar is 44px and already
-carries the watch toggle, the folder, the count and the view control; two more
-path buttons in it read as clutter, and the submenu labels can carry the current
-filename, which two buttons could not. It goes through the same `popup()` helper
-in `App.tsx` as the filmstrip menus, so the keep-one-menu-alive lifetime that
-comment describes applies here too. When both slots are empty the button says
-"No overlays" in gray - a fresh install has no branding, and that state has to
-look deliberate rather than unloaded. See "The overlay SVGs" for what clearing
-means and how the setting reaches the pipeline.
+submenu per orientation. The bar is 44px and already carries the watch toggle, the
+folder, the count and the view control; two more path buttons in it read as
+clutter, and the submenu labels can carry the current choice, which two buttons
+could not. It goes through the same `popup()` helper in `App.tsx` as the filmstrip
+menus, so the keep-one-menu-alive lifetime that comment describes applies here
+too. When both slots are `None` the button says "No overlays" in gray - since a
+fresh install is on the sample, that now means the operator turned both off rather
+than that nothing has loaded.
+
+Inside each submenu the three choices are **check items, not plain ones**: they
+are three settings of one thing, and the tick is what says which is live. Only
+landscape offers "Sample overlay", because that is the only sample drawn, and
+"Reveal Sample overlay in Finder" sits at the *top* level rather than in both
+submenus - there is one sample, and a copy under Portrait would raise the question
+of what it reveals.
+
+A trap worth knowing before touching those menus: Tauri's `MenuItemPayloadKind` is
+`#[serde(untagged)]` and tries `Check` **before** `Submenu`
+(`tauri/src/menu/plugin.rs`), and `CheckMenuItemPayload.checked` is a
+non-optional `bool`. So a plain `{text, checked, action}` object becomes a real
+macOS check item with no ceremony - and **`checked` on a submenu object would
+parse as a check item and make its `items` vanish**. Never put it there.
+
+See "The overlay SVGs" for what each choice means and how it reaches the pipeline.
 
 **The info line under the photo is one truncating `Text`, and every group in it
 drops out when the source has nothing for it.** `Info` in `Actions.tsx` reads
@@ -375,10 +390,26 @@ problem that fsevents were buying.
 
 ## The overlay SVGs
 
-**snappr ships no branding.** There are two overlay slots, one per orientation,
-and both are **operator settings picked from the top bar** - not assets this repo
-provides. A fresh install has neither, and that is a working configuration, not a
-broken one.
+**snappr ships no branding, but it does ship one sample.** There are two overlay
+slots, one per orientation, and each is an **operator setting picked from the top
+bar**. Each is one of three things, all of them working configurations:
+
+| | what it composites |
+|---|---|
+| **Sample** | `sample/overlay-landscape.svg`, the one overlay in the bundle |
+| **Custom** | an SVG the operator picked from anywhere on disk |
+| **None** | nothing - the photo is cropped to the print ratio and left alone |
+
+A fresh install is Sample for landscape and None for portrait. That asymmetry is
+deliberate: only a landscape sample is drawn, so a portrait Sample composites
+nothing and prints exactly like None. Keeping the variant meaningful for both
+orientations is what lets a portrait sample be added later and picked up by every
+install that never chose.
+
+The sample exists so a first photo shows *something* - an app whose out-of-the-box
+behaviour is "nothing visibly happens" gives the operator nothing to react to -
+and so that whoever draws the real overlay has a worked example. It is a starting
+point, not branding, which is why it lives in `sample/` and not in `share/`.
 
 | | frame | branding |
 |---|---|---|
@@ -390,12 +421,22 @@ Giving the branding 2/5 of the frame and the photo 3/5 splits along the frame's
 strip: 2/5 of a 100mm width is only about 40mm, and artwork shrinks badly in it.
 That is design advice for whoever draws one, not something Ruby knows.
 
-**An empty slot means no overlay at all.** The photo is still cropped to the
+**A `None` slot means no overlay at all.** The photo is still cropped to the
 print ratio, but nothing is composited over it: `Overlay::FULL_FRAME` stands in
 for the window, so the canvas comes out equal to the crop, the photo lands at
 (0, 0), and the seam margin is 0. The output is then bit-identical to the source
 across the *whole* frame rather than only where the overlay is clear -
 `overlay_test.rb` asserts exactly that.
+
+**The sample is a watermark, and its marker covers the whole frame.** So it takes
+the same full-frame-window path, with one difference: an SVG *is* being
+composited, so the seam margin applies and the canvas comes out 4px smaller on
+each axis than the plain crop. The photo still fills the entire print and the
+wordmark sits on top of it, over about 1% of the pixels. `overlay_svg_test.rb`
+pins the window at exactly `{0, 0, 1, 1}` - a redraw that inset it would silently
+turn every default print into a bordered one - and `overlay_test.rb` asserts the
+photo survives bit-for-bit under it, which with ~99% clear is the strongest form
+of that check anywhere in the suite.
 
 One trap in that path: **`flatten` is not a no-op on an image with no alpha.** It
 fails with `linear: vector must have 1 or 2 elements`, which points nowhere near
@@ -412,21 +453,50 @@ Wrong branding on a print is worse than none.
 
 Where the settings live and how they reach the pipeline:
 
-- `Settings::overlay_svg_landscape` / `_portrait` in `src-tauri/src/settings.rs`,
-  `Option<PathBuf>`, persisted to `app_config_dir()/settings.json` next to
-  `watch_dir`. **The path is remembered, not the file copied** - re-exporting a
-  design over the same path takes effect on the next photo with no re-picking.
-- `pipeline_config()` emits them as `overlay_svg: { landscape, portrait }`, with
-  an explicit `null` for a cleared slot. It has to be explicit: `Server#hello`
-  merges the frame over `Config::DEFAULTS`, so an absent key would let a default
-  win, and the default is the thing being overridden.
-- `set_overlay_svg` pushes the change to the running child with `Sidecar::
+- `Settings::overlay_landscape` / `overlay_portrait` in
+  `src-tauri/src/settings.rs`, of type `Overlay`, persisted to
+  `app_config_dir()/settings.json` next to `watch_dir`. **A custom path is
+  remembered, not copied** - re-exporting a design over the same path takes effect
+  on the next photo with no re-picking.
+- **`Overlay` never reaches Ruby.** `Overlay::resolve` turns it into a path or
+  nothing on the Rust side, so `lib/snappr` still sees exactly what it always saw
+  and needed no changes at all for the sample. It could not do the lookup itself
+  either: `SNAPPR_ROOT` is `Resources/snappr` in a bundle and the repo root in
+  development, and `sample/` sits *beside* the first but *inside* the second.
+- `pipeline_config(app)` emits `overlay_svg: { landscape, portrait }`, with an
+  explicit `null` for a slot that resolves to nothing. `Server#hello` merges the
+  frame over `Config::DEFAULTS`, whose overlay entries are nil - so absent and
+  null happen to be identical today, and the null is there because this is the
+  side that decides overlays and should say so outright. **Keep the Ruby default
+  nil**, or the two stop agreeing.
+- `set_overlay` pushes the change to the running child with `Sidecar::
   reconfigure`, so no relaunch is needed. Photos already in the strip keep their
   output; the per-photo retry button is how one gets regenerated.
+- **The slot is the only setting whose on-disk shape has ever changed**, and
+  `Settings::load` answers any parse failure by discarding the whole file - so a
+  field that cannot read its own history costs the operator their watch folder and
+  printer, not just their overlay. `Overlay`'s hand-written `Deserialize` reads the
+  legacy `null` (as Sample) and legacy path string (as Custom) as well as the
+  tagged form, `#[serde(alias)]` reads the old key names, and the field names are
+  what get written back - so the file migrates itself on the first save. The six
+  tests in `settings.rs` are there for exactly this and are the only Rust tests in
+  the project.
 
-**`share/` is test material, not branding**, and must never be listed in
-`bundle.resources`. `config/snappr.yml` still points at it because that file is
-the CLI's config and nothing else reads it - the app never calls `Config.load`.
+**Two folders of SVGs, and the distinction is load-bearing:**
+
+- **`sample/` ships.** It is the *only* entry in `bundle.resources`, mapped
+  `{"../sample/*.svg": "sample"}` - the source→target map form, because the folder
+  sits outside `src-tauri/` and the list form would land it at `Resources/_up_/`.
+  `tauri-build` copies it into `target/debug/` in development too, so
+  `BaseDirectory::Resource` finds it in both modes and no fallback is needed.
+- **`share/` is test material, not branding**, and must never be listed in
+  `bundle.resources`. `config/snappr.yml` still points at it because that file is
+  the CLI's config and nothing else reads it - the app never calls `Config.load`.
+
+Adding that `resources` key was safe only because it does not create
+`Resources/snappr`, which is what `Runtime::detect` probes to choose the bundle
+layout. See the header of `runtime.rs`: that layout is still unwired and
+`in_bundle` has never run.
 
 **Draw them in whatever tool you like.** Figma, Illustrator and Inkscape exports
 all work unmodified. There are three rules:
@@ -674,8 +744,10 @@ lib/snappr/overlay.rb     orientation, window fit, colour-managed composite, PNG
 lib/snappr/watcher.rb     drop folder via the listen gem, candidate? guard, stability check
 lib/snappr/cli.rb         subcommand dispatch (Snappr::CLI)
 src-tauri/src/problem.rs  the shell's half of the catalogue, same two-version rule
-share/                       sample overlays for the CLI and for testing - NOT
-                             shipped branding, and never in bundle.resources
+sample/overlay-landscape.svg the ONE overlay that ships - the landscape default,
+                             and the only entry in bundle.resources
+share/                       overlays for the CLI and for testing - NOT shipped,
+                             and never in bundle.resources
 test/fixtures/               the same design in several SVG dialects
 config/snappr.yml
 mise.toml

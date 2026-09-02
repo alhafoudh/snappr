@@ -8,11 +8,11 @@ import { confirm, open } from "@tauri-apps/plugin-dialog";
 
 import { usePhotos } from "./usePhotos";
 import { useNow } from "./useNow";
-import { Toolbar, baseName } from "./components/Toolbar";
+import { Toolbar, baseName, overlayName, SAMPLE_NAME } from "./components/Toolbar";
 import { Stage } from "./components/Stage";
 import { Actions } from "./components/Actions";
 import { Filmstrip } from "./components/Filmstrip";
-import type { Notice, Orientation, Photo, View } from "./types";
+import type { Notice, Orientation, Overlay, Photo, View } from "./types";
 
 export default function App() {
   const {
@@ -25,7 +25,7 @@ export default function App() {
     clearPhoto,
     clearAllPhotos,
     changeWatchDir,
-    changeOverlaySvg,
+    changeOverlay,
     setWatching,
   } = usePhotos();
   const [view, setView] = useState<View>("overlay");
@@ -329,19 +329,21 @@ export default function App() {
     }
   };
 
-  const overlayOf = (orientation: Orientation) =>
-    (orientation === "landscape" ? settings?.overlay_svg_landscape : settings?.overlay_svg_portrait) ?? null;
+  const overlayOf = (orientation: Orientation): Overlay =>
+    (orientation === "landscape" ? settings?.overlay_landscape : settings?.overlay_portrait) ?? {
+      kind: "none",
+    };
 
   const setOverlay = useCallback(
-    async (orientation: Orientation, path: string | null) => {
+    async (orientation: Orientation, choice: Overlay) => {
       setProblem(null);
       try {
-        await changeOverlaySvg(orientation, path);
+        await changeOverlay(orientation, choice);
       } catch (error) {
         fail(error);
       }
     },
-    [changeOverlaySvg],
+    [changeOverlay],
   );
 
   const pickOverlay = async (orientation: Orientation) => {
@@ -349,34 +351,65 @@ export default function App() {
     const chosen = await open({
       multiple: false,
       filters: [{ name: "SVG", extensions: ["svg"] }],
-      defaultPath: current ?? undefined,
+      defaultPath: current.kind === "custom" ? current.path : undefined,
     });
-    if (typeof chosen === "string") await setOverlay(orientation, chosen);
+    if (typeof chosen === "string") await setOverlay(orientation, { kind: "custom", path: chosen });
   };
 
-  // The branding, one slot per orientation. A submenu each rather than four flat
-  // items, so the label can carry the current filename and the whole state reads
-  // at a glance. Clearing means no overlay at all - snappr ships none, and a
-  // cleared slot prints the crop unbranded.
+  // One slot per orientation, each a submenu, so the label can carry the current
+  // choice and the whole state reads at a glance.
+  //
+  // The choices are check items rather than plain ones: they are three settings of
+  // one thing, not three actions, and the tick is what says which is live. A plain
+  // object with a `checked` key is enough - Tauri's MenuItemPayloadKind is untagged
+  // and tries Check before Submenu. The corollary is a trap: never put `checked` on
+  // a submenu object, or it parses as a check item and its `items` vanish.
+  //
+  // Only landscape offers "Sample overlay", because that is the only sample drawn.
+  // Reveal sits at the top level rather than in both submenus: there is one sample,
+  // and a copy under Portrait would raise the question of what it reveals.
   const overlayMenu = () => {
     const slot = (orientation: Orientation, label: string) => {
       const current = overlayOf(orientation);
+      const choice = (id: string, text: string, chosen: Overlay) => ({
+        id: `${id}-${orientation}`,
+        text,
+        checked: current.kind === chosen.kind,
+        action: () => void setOverlay(orientation, chosen),
+      });
+
       return {
         id: `overlay-${orientation}`,
-        text: `${label}: ${current ? baseName(current) : "None"}`,
+        text: `${label}: ${overlayName(current)}`,
         items: [
-          { id: `pick-${orientation}`, text: "Choose...", action: () => void pickOverlay(orientation) },
-          { item: "Separator" as const },
+          ...(orientation === "landscape"
+            ? [choice("sample", SAMPLE_NAME, { kind: "sample" })]
+            : []),
           {
-            id: `clear-${orientation}`,
-            text: "Clear",
-            enabled: !!current,
-            action: () => void setOverlay(orientation, null),
+            id: `pick-${orientation}`,
+            // The filename rather than a bare "Choose...", so the item says what
+            // is currently picked without the operator opening the dialog to find out.
+            text: current.kind === "custom" ? `${baseName(current.path)}...` : "Choose...",
+            checked: current.kind === "custom",
+            action: () => void pickOverlay(orientation),
           },
+          choice("clear", "No overlay", { kind: "none" }),
         ],
       };
     };
-    void popup([slot("landscape", "Landscape"), slot("portrait", "Portrait")]);
+
+    void popup([
+      slot("landscape", "Landscape"),
+      slot("portrait", "Portrait"),
+      { item: "Separator" as const },
+      {
+        id: "reveal-sample",
+        text: `Reveal ${SAMPLE_NAME} in Finder`,
+        action: () => {
+          invoke("reveal_sample_overlay").catch(fail);
+        },
+      },
+    ]);
   };
 
   const reveal = () => {

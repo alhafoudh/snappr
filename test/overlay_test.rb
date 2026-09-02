@@ -127,6 +127,30 @@ class OverlayTest < Minitest::Test
     end
   end
 
+  # The overlay a fresh install composites, so this is the path most prints
+  # actually take. Its window is the whole frame, which is the case the branded
+  # overlay never exercises: the photo covers the entire canvas and the wordmark
+  # sits on top, so "untouched wherever the overlay is clear" has to hold across
+  # ~99% of the output rather than inside a panel.
+  def test_photo_is_untouched_under_the_shipped_sample
+    # The whole key, not the `landscape:` argument: that one is a fixture basename
+    # and this is an absolute path, which is also how the app sends it.
+    config = test_config("overlay_svg" => { "landscape" => shipped_sample.to_s, "portrait" => nil })
+    overlay = Snappr::Overlay.new(config)
+    in_tmpdir do |dir|
+      noise = Vips::Image.gaussnoise(2400, 1800, mean: 128, sigma: 55).cast(:uchar)
+      source = File.join(dir, "noisy.png")
+      noise.bandjoin([noise.rot180, noise.fliphor]).copy(interpretation: :srgb).write_to_file(source)
+
+      layout = overlay.layout_for(stub_image(2400, 1800), shipped_sample, :landscape)
+      image = load_image(overlay.call(source))
+
+      assert_equal 0,
+                   photo_difference_under_clear_overlay(source, image, layout, shipped_sample),
+                   "the sample must not alter the photo it watermarks"
+    end
+  end
+
   # object-fit: cover means the crop is taken from the middle of the photo.
   def test_crop_is_centred_on_the_photo
     in_tmpdir do |dir|

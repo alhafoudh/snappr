@@ -51,12 +51,11 @@ export interface Settings {
   watch_dir: string;
   watch_enabled: boolean;
   /**
-   * The branding, one SVG per orientation. `null` is a real setting and the
-   * default of a fresh install: that orientation prints the crop with nothing
-   * composited over it. snappr ships no branding of its own.
+   * What each orientation composites. Landscape starts on the shipped sample,
+   * portrait on nothing - there is no portrait sample drawn.
    */
-  overlay_svg_landscape: string | null;
-  overlay_svg_portrait: string | null;
+  overlay_landscape: Overlay;
+  overlay_portrait: Overlay;
   extensions: string[];
   output_suffix: string;
   background: string;
@@ -118,3 +117,16 @@ export type View = "overlay" | "source";
 
 /** The two overlay slots, which are also the two crop shapes. */
 export type Orientation = "landscape" | "portrait";
+
+/**
+ * What an orientation composites over the crop. Mirrors the adjacently-tagged
+ * `Overlay` enum in `src-tauri/src/settings.rs`.
+ *
+ * `sample` is the one overlay snappr ships, and only landscape has one - a
+ * portrait `sample` composites nothing, exactly like `none`. `none` is a real
+ * setting: the photo is still cropped to the print ratio, with nothing drawn on it.
+ */
+export type Overlay =
+  | { kind: "sample" }
+  | { kind: "none" }
+  | { kind: "custom"; path: string };

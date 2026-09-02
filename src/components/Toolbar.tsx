@@ -1,11 +1,31 @@
 import { Box, Button, Flex, Heading, SegmentedControl, Separator, Text, Tooltip } from "@radix-ui/themes";
 import { DotFilledIcon } from "@radix-ui/react-icons";
 
-import type { Settings, View } from "../types";
+import type { Overlay, Settings, View } from "../types";
 
 /** The last segment of a path, for a folder or a file. */
 export function baseName(path: string) {
   return path.replace(/\/+$/, "").split("/").pop() || path;
+}
+
+/**
+ * What the shipped overlay is called everywhere it is named. One constant because
+ * it appears in the menu twice and in the tooltip, and the three have to agree -
+ * the operator has to recognise the thing the Reveal item hands them as the thing
+ * the tick is on.
+ */
+export const SAMPLE_NAME = "Sample overlay";
+
+/** What a slot is set to, for a menu label or a tooltip. */
+export function overlayName(overlay: Overlay) {
+  switch (overlay.kind) {
+    case "sample":
+      return SAMPLE_NAME;
+    case "custom":
+      return baseName(overlay.path);
+    case "none":
+      return "No overlay";
+  }
 }
 
 /**
@@ -55,9 +75,12 @@ export function Toolbar({
   const watching = wanted && !failed;
   // Named so the tooltip says what will actually be printed, rather than making
   // "none" look like a loading state. Cleared is a real, working setting.
-  const landscape = settings?.overlay_svg_landscape;
-  const portrait = settings?.overlay_svg_portrait;
-  const branded = !!(landscape || portrait);
+  // Whether anything will actually be drawn, which is what the label reports.
+  // A fresh install is on the sample, so "No overlays" now means the operator
+  // turned both off rather than that nothing has loaded yet.
+  const landscape = settings?.overlay_landscape;
+  const portrait = settings?.overlay_portrait;
+  const draws = landscape?.kind !== "none" || portrait?.kind !== "none";
 
   return (
     <Flex direction="column">
@@ -112,8 +135,8 @@ export function Toolbar({
           <Tooltip
             content={
               settings
-                ? `Landscape: ${landscape ? baseName(landscape) : "no overlay"}\n` +
-                  `Portrait: ${portrait ? baseName(portrait) : "no overlay"}`
+                ? `Landscape: ${landscape ? overlayName(landscape) : "..."}\n` +
+                  `Portrait: ${portrait ? overlayName(portrait) : "..."}`
                 : "Loading..."
             }
           >
@@ -125,7 +148,7 @@ export function Toolbar({
               disabled={!settings}
               aria-label="Overlays"
             >
-              <Text color={branded ? undefined : "gray"}>{branded ? "Overlays" : "No overlays"}</Text>
+              <Text color={draws ? undefined : "gray"}>{draws ? "Overlays" : "No overlays"}</Text>
             </Button>
           </Tooltip>
 

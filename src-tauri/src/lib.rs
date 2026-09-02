@@ -24,7 +24,7 @@ use tauri_plugin_window_state::StateFlags;
 use photo::{Index, Photo, Status};
 use problem::{detail, Problem};
 use runtime::Runtime;
-use settings::Settings;
+use settings::{Orientation, Overlay, Settings};
 use sidecar::Sidecar;
 use watcher::{Arrival, Refusal};
 
@@ -403,49 +403,41 @@ fn set_watch_dir(app: AppHandle, state: State<AppState>, dir: PathBuf) -> Result
     Ok(updated)
 }
 
-/// Picks the overlay for one orientation, or clears it with `None`.
+/// Sets what one orientation composites: the shipped sample, a picked SVG, or
+/// nothing.
 ///
-/// A cleared slot is not a broken one: that orientation prints the crop with
-/// nothing composited over it, which is also what a fresh install does. snappr
-/// ships no branding, so this is the only way any gets in.
+/// None of the three is a broken state. Nothing at all still prints - the photo is
+/// cropped to the print ratio with nothing over it - and the sample is what a fresh
+/// install lands on so that a first photo shows something rather than looking like
+/// the app did not run.
 ///
-/// Only that the file exists is checked. An SVG with no #FF00FF window, or one
+/// Only that a picked file exists is checked. An SVG with no #FF00FF window, or one
 /// drawn at the wrong shape, comes back as a warning on the photo itself - which
-/// the filmstrip and the Actions bar already show - rather than as a rejected
-/// pick, because that is where the operator can see it against the result.
+/// the filmstrip and the Actions bar already show - rather than as a rejected pick,
+/// because that is where the operator can see it against the result.
 ///
 /// Photos already in the strip keep their output. Regenerating one is what the
 /// retry button is for; silently rewriting a strip's worth of 10-25 MB PNGs
 /// because a menu item was clicked is not worth the surprise.
 #[tauri::command]
-fn set_overlay_svg(
+fn set_overlay(
     app: AppHandle,
     state: State<AppState>,
-    orientation: String,
-    path: Option<PathBuf>,
+    orientation: Orientation,
+    choice: Overlay,
 ) -> Result<Settings, String> {
-    // Internal: the Overlays menu only ever sends one of the two, so this is a
-    // bug in the caller rather than anything an operator did. No catalogue entry
-    // for the same reason - nobody will read it.
-    if !matches!(orientation.as_str(), "landscape" | "portrait") {
-        return Err(format!("unknown orientation: {orientation}"));
-    }
-    if let Some(path) = &path {
+    if let Overlay::Custom(path) = &choice {
         if !path.is_file() {
             let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             return Err(Problem::OverlayFileGone { file, path }.say());
         }
     }
-    let chosen = path
-        .as_ref()
-        .map_or_else(|| "none".to_string(), |p| p.display().to_string());
 
     let updated = {
         let mut settings = state.settings.lock().unwrap();
-        if orientation == "landscape" {
-            settings.overlay_svg_landscape = path;
-        } else {
-            settings.overlay_svg_portrait = path;
+        match orientation {
+            Orientation::Landscape => settings.overlay_landscape = choice,
+            Orientation::Portrait => settings.overlay_portrait = choice,
         }
         settings.save(&app)?;
         settings.clone()
@@ -457,10 +449,19 @@ fn set_overlay_svg(
     let sidecar = state.sidecar.lock().unwrap().clone();
     if let Some(sidecar) = sidecar {
         let preview_dir = Index::preview_dir(&app)?;
-        sidecar.reconfigure(updated.pipeline_config(), &preview_dir.display().to_string())?;
+        sidecar.reconfigure(updated.pipeline_config(&app), &preview_dir.display().to_string())?;
     }
 
-    log::info!("{orientation} overlay is now {chosen}");
+    // The resolved path rather than the choice, because that is what the pipeline
+    // was actually handed and what a puzzled log reader needs to see.
+    let resolved = match orientation {
+        Orientation::Landscape => updated.overlay_landscape.resolve(&app, orientation),
+        Orientation::Portrait => updated.overlay_portrait.resolve(&app, orientation),
+    };
+    log::info!(
+        "{orientation:?} overlay is now {}",
+        resolved.map_or_else(|| "nothing".to_string(), |p| p.display().to_string())
+    );
     Ok(updated)
 }
 
@@ -639,13 +640,11 @@ fn print_photo(window: WebviewWindow, state: State<AppState>, source: PathBuf) -
     mac::print(&window, &destination, landscape, &paper)
 }
 
-/// Finder, with the PNG selected. The escape hatch for anything the app cannot do.
-#[tauri::command]
-fn reveal_photo(state: State<AppState>, source: PathBuf) -> Result<(), String> {
-    let (destination, _) = destination_of(&state, &source)?;
+/// Finder, with the file selected.
+fn reveal(path: &Path) -> Result<(), String> {
     std::process::Command::new("open")
         .arg("-R")
-        .arg(&destination)
+        .arg(path)
         .status()
         .map_err(|e| Problem::FinderWontOpen { detail: detail(e) }.say())
         .and_then(|status| {
@@ -653,6 +652,32 @@ fn reveal_photo(state: State<AppState>, source: PathBuf) -> Result<(), String> {
                 Problem::FinderWontOpen { detail: format!("open -R exited {status}") }.say()
             })
         })
+}
+
+/// Finder, with the PNG selected. The escape hatch for anything the app cannot do.
+#[tauri::command]
+fn reveal_photo(state: State<AppState>, source: PathBuf) -> Result<(), String> {
+    let (destination, _) = destination_of(&state, &source)?;
+    reveal(&destination)
+}
+
+/// Finder, with the shipped sample overlay selected, so it can be copied out and
+/// used as the starting point for a real one.
+///
+/// This reveals the original in place rather than exporting a copy, which is worth
+/// knowing the shape of: in a built `.app` the file sits in `Contents/Resources`,
+/// so Finder opens a package-contents view, the file is read-only, and an app run
+/// from a mounted DMG is on a read-only volume besides. Under `tauri dev` the
+/// target is the build script's copy in `target/debug/sample/`, and edits there are
+/// overwritten by the next build. Either way the operator copies it somewhere of
+/// their own first, which is the intended gesture - this is a "here is the file"
+/// button, not an "edit this" one.
+#[tauri::command]
+fn reveal_sample_overlay(app: AppHandle) -> Result<(), String> {
+    let path = Overlay::Sample.resolve(&app, Orientation::Landscape).ok_or_else(|| {
+        Problem::FinderWontOpen { detail: "this build ships no sample overlay".into() }.say()
+    })?;
+    reveal(&path)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -694,7 +719,7 @@ pub fn run() {
             get_settings,
             set_watch_dir,
             set_watching,
-            set_overlay_svg,
+            set_overlay,
             reprocess,
             clear_photo,
             clear_all_photos,
@@ -702,6 +727,7 @@ pub fn run() {
             share_photo,
             print_photo,
             reveal_photo,
+            reveal_sample_overlay,
         ])
         // Files dropped on the window. Tauri owns drag-and-drop (dragDropEnabled is
         // on, the default), so the webview never sees the drop and cannot navigate
@@ -733,7 +759,7 @@ pub fn run() {
                     let preview_dir = Index::preview_dir(&boot)?;
                     Sidecar::start(
                         &runtime,
-                        settings.pipeline_config(),
+                        settings.pipeline_config(&boot),
                         &preview_dir.display().to_string(),
                     )
                 });
