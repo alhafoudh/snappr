@@ -20,6 +20,24 @@ dropped; `Plans/20260822-snappr-ingest-pipeline.md` and
 `Plans/20260822-snappr-live-ingest.md` remain only as the historical record.
 **Do not reintroduce darktable.**
 
+## Which document owns what
+
+Three files, and a change belongs in exactly one of them. **Put the paragraph in
+with the commit that earns it** - the six commits that built the desktop app did
+not, and the result was a `CLAUDE.md` that went on asserting things the app had
+already made untrue.
+
+| document | owns |
+|---|---|
+| `CLAUDE.md` | the pipeline, the print, and every invariant protecting the photo |
+| `docs/desktop-app.md` | the Rust shell, the React UI, the sidecar, settings, drops |
+| `docs/bundled-runtime.md` | the Ruby and libvips that ship inside `snappr.app` |
+
+A fourth rule outranks all three: **prefer a comment at the site over a paragraph
+here.** Most of this codebase argues its own decisions where they live, with the
+bug and the measurement attached, and that is the version that cannot drift. These
+documents are for what spans files and therefore fits in none of them.
+
 ## Stack
 
 - Ruby 3.4.5, pinned by `mise.toml`
@@ -30,137 +48,26 @@ dropped; `Plans/20260822-snappr-ingest-pipeline.md` and
 No Rails. Runtime gems are `image_processing`, `listen`, `ruby-vips`, `rexml`,
 `zeitwerk` and nothing else.
 
-## The desktop UI
+## The desktop app
 
 The Tauri app lives at the repo root: `src/` is the React frontend, `src-tauri/`
-the Rust shell. React 18 + Vite + TypeScript, and **Radix Themes 3 carries the
-whole look**.
+the Rust shell, and a Ruby child process does the image work. **It has its own
+document: `docs/desktop-app.md`.** That covers the sidecar protocol, the Radix UI,
+the preview tier, the settings file, printing and drops, and the message
+catalogue.
 
-**There is no stylesheet, by design.** `src/app.css` was deleted in the Radix
-rewrite. Layout, colour, spacing, selection and status all come from Radix
-components, their props and their tokens - a dark-only `<Theme>` in
-`src/main.tsx`. Do not reintroduce an app stylesheet: the point is that there is
-exactly one place the design comes from. Raw CSS survives in three places only,
-each of which Radix genuinely cannot express:
+Two things about it belong here, because they change what the pipeline may assume:
 
-- `index.html` sets `margin: 0` on `<body>`. Radix ships no html/body reset, and
-  without it the `100vh` grid overflows by the browser's default 8px.
-- `objectFit` is inline on the two `<img>` elements, in `Stage.tsx` and
-  `Filmstrip.tsx`. There is no Radix prop for it, and inline style on an `<img>`
-  is what Radix's own examples do. The comment on the letterbox rule is
-  load-bearing: the overlayed and original views have different aspect ratios by
-  design, so the box needs a definite size or a portrait source stretches it.
-- Pixel literals passed *as Radix props* (`height="84px"`,
-  `columns="repeat(n, 132px)"`). Those props are typed `"enum | string"` for
-  exactly this.
-
-Two things that look like they could be simplified and cannot:
-
-- **The filmstrip is `RadioCards`.** The selection ring, hover, focus ring,
-  roving arrow-key focus and radiogroup semantics all come with it, which is most
-  of what the old stylesheet was for. Because it owns the arrow keys while
-  focused, the global keydown handler in `App.tsx` skips events originating
-  inside a `[role="radiogroup"]` or `[role="group"]` - without that guard one
-  arrow press moves the selection twice.
-- **`disabled` goes on `SegmentedControl.Root`, never on its Items.** The Item
-  type removes the prop.
-- **Never wrap a `RadioCards.Item` in a `Tooltip`.** Tooltip's trigger is
-  `asChild` and puts its own `data-state` on whatever it wraps, and RadioGroup's
-  item spreads incoming props *after* setting `data-state`
-  (`react-radio-group/dist/index.mjs:94-98`), so the wrapper's `closed` wins and
-  the checked styling never renders. It fails silently: the selected cell simply
-  looks idle, which reads as "Radix selection is too subtle" rather than as a
-  bug. The Tooltip goes inside the Item.
-
-**The keyboard map**, all of it in one `window` keydown handler in `App.tsx`:
-
-| Key | Does |
-|---|---|
-| `Left` / `Right` | next / previous thumb |
-| `` ` `` | toggle overlayed against original |
-| `Cmd+P` | print |
-
-**Tab does nothing, anywhere in the app.** The handler calls `preventDefault` on
-it unconditionally and steps nothing, so the browser's focus traversal is
-suppressed outright rather than left to walk the toolbar. This is deliberate:
-there is no form here to tab through, and every control is a single button
-reached with the mouse. The arrows are the strip's navigation - Tab used to be a
-second next/previous and no longer is, which is why the branch looks empty apart
-from the `preventDefault`. Do not delete it as dead code, and do not "restore
-accessibility" by deleting it either - the filmstrip is a radiogroup and is still
-fully operable from the keyboard.
-
-`` ` `` rather than Lightroom's `\` for the before/after toggle: it is under the
-left little finger without a reach, and the gesture gets used dozens of times an
-hour.
-
-**The context menus are native** (`@tauri-apps/api/menu`), not Radix
-`ContextMenu`. This is a macOS-only app and the OS gets placement, keyboard
-handling and dismissal right for nothing.
-
-**The Overlays button is one button, not two**, and it opens a native menu with a
-submenu per orientation. The bar is 44px and already carries the watch toggle, the
-folder, the count and the view control; two more path buttons in it read as
-clutter, and the submenu labels can carry the current choice, which two buttons
-could not. It goes through the same `popup()` helper in `App.tsx` as the filmstrip
-menus, so the keep-one-menu-alive lifetime that comment describes applies here
-too. When both slots are `None` the button says "No overlays" in gray - since a
-fresh install is on the sample, that now means the operator turned both off rather
-than that nothing has loaded.
-
-Inside each submenu the three choices are **check items, not plain ones**: they
-are three settings of one thing, and the tick is what says which is live. Only
-landscape offers "Sample overlay", because that is the only sample drawn, and
-"Reveal Sample overlay in Finder" sits at the *top* level rather than in both
-submenus - there is one sample, and a copy under Portrait would raise the question
-of what it reveals.
-
-A trap worth knowing before touching those menus: Tauri's `MenuItemPayloadKind` is
-`#[serde(untagged)]` and tries `Check` **before** `Submenu`
-(`tauri/src/menu/plugin.rs`), and `CheckMenuItemPayload.checked` is a
-non-optional `bool`. So a plain `{text, checked, action}` object becomes a real
-macOS check item with no ceremony - and **`checked` on a submenu object would
-parse as a check item and make its `items` vanish**. Never put it there.
-
-See "The overlay SVGs" for what each choice means and how it reaches the pipeline.
-
-**The info line under the photo is one truncating `Text`, and every group in it
-drops out when the source has nothing for it.** `Info` in `Actions.tsx` reads
-camera, lens and exposure from `photo.exif`, so a screenshot or a scan gives
-exactly the line snappr showed before any EXIF was read. Two rules there are not
-obvious:
-
-- **The lens is dropped when it only restates the camera.** Apple writes
-  `LensModel` as `"<camera> back camera 6.765mm f/1.78"` - the camera name, then
-  the focal length and aperture the line already prints. The rule lives in
-  `Snappr::Exif`, not in the frontend, so the shell receives values it can print
-  unmodified. It keeps every interchangeable lens, which is where the lens is the
-  interesting fact.
-- **The shutter time is shown only when it is more than `TAKEN_AT_DRIFT` from the
-  arrival time.** `added_at` is when snappr saw the file, not when the shutter
-  fired. For a photo AirDropped straight off the phone those are seconds apart
-  and "added 2 minutes ago" says everything; for one out of the camera roll the
-  arrival time is actively misleading, and only then does the line grow a
-  `taken 21 Mar, 12:40` group.
-
-The line hover is a Radix `Tooltip` carrying the same facts in full, including
-the two deliberately kept off the line - the 35mm equivalent and the exact clock
-times. The `<time>` element inside it carries no `title` of its own: a native
-tooltip underneath a Radix one races it and wins.
-
-**The titlebar drag region is `data-tauri-drag-region="deep"`.** Tauri's
-`drag.js` treats the bare attribute as "only direct clicks on this element", so a
-wrapper element between the header and the pointer silently stops the window
-dragging. The same script already refuses to drag from a clickable element, which
-is why the old `-webkit-app-region: no-drag` rule was never needed and is gone.
-
-Caveat worth knowing: Radix's stylesheet uses `color-mix()` and `:has()`, which
-want Safari 16.2 / 15.4 WebKit, while `minimumSystemVersion` is 11.0. Big Sur can
-run Safari 16.6, so a stock un-updated Big Sur degrades rather than breaks, and
-`panelBackground="solid"` avoids the translucent surfaces that suffer most.
+- **The app never calls `Config.load`.** Its settings travel to Ruby in the
+  sidecar handshake, so `config/snappr.yml` is the CLI's config and nothing else
+  reads it.
+- **The app is stateful where the pipeline is not** - see the end of
+  Architecture below.
 
 Run it with `npm run tauri dev` (Vite on a fixed port 5183), after
-`mise run runtime` has built the bundled Ruby and libvips into `build/`.
+`mise run runtime` has built the bundled Ruby and libvips into `build/`. What that
+builds, and why it is built rather than borrowed from Homebrew, is
+`docs/bundled-runtime.md`.
 
 ## Tooling
 
@@ -173,7 +80,12 @@ mise run setup            bundle install
 mise run watch            watch the drop folder and overlay each photo that lands
 mise run overlay PATH     overlay the given photos now, then open them
 mise run test             unit tests
+mise run runtime          build the Ruby and libvips that ship inside snappr.app
 ```
+
+`mise run runtime` and the five `runtime-*` tasks behind it are
+`docs/bundled-runtime.md`. You need them before `npm run tauri dev`, and not at
+all for the CLI.
 
 `SNAPPR_ROOT` comes from mise's `{{config_root}}`, so `Snappr::Config` resolves
 every path against the project root rather than the working directory. There is
@@ -182,7 +94,9 @@ an `__dir__` fallback so `bin/snappr` still works when invoked directly.
 `mise run overlay` is the loop for iterating on the overlays - it takes paths
 straight off the command line, so you never have to AirDrop anything to see a
 change. Pass it one landscape and one portrait photo to check both variants at
-once.
+once - but note that the portrait slot in `config/snappr.yml` currently names a
+file that is not there, so a portrait photo comes out unbranded with a warning
+until that is pointed at a real SVG.
 
 ## Architecture
 
@@ -219,28 +133,62 @@ The photo is fitted to the overlay's window rather than the overlay being sized
 to the photo, so the branding always sits exactly where the SVG puts it and is
 never itself cropped.
 
-There is no state, no queue and no daemon bookkeeping. Nothing persists between
-runs; re-running on the same photo just overwrites its `.overlay.png`.
+**The pipeline is stateless.** Nothing above persists anything between runs;
+re-running on the same photo just overwrites its `.overlay.png`.
+
+**The desktop app is not, and that is deliberate.** It keeps an `index.json` so
+the filmstrip survives a restart - see the module comment on
+`src-tauri/src/photo.rs`, which says outright that it supersedes the paragraph
+above. A filmstrip that survives a relaunch cannot be stateless, and at an event a
+crash halfway through should not lose what has already been printed. The index is
+never authoritative about the disk: the `.overlay.png` beside the original is
+still the real artefact, and a record whose PNG has gone is dropped rather than
+shown as a broken cell.
+
+The app also derives three preview JPEGs per photo for the window to draw - the
+print itself is 10-25 MB and cannot be handed to a webview. They live in the app's
+own data directory, never beside the photo; `lib/snappr/preview.rb` is the whole
+of it, and "Previews never go in the drop folder" under Hard constraints is why.
+See `docs/desktop-app.md`.
 
 ## Everything stays where it is
 
-There is no `var/`. snappr creates no directories and writes no databases, logs
-or staging trees. `~/Downloads` is the only path outside the project it touches,
-and the only thing it ever writes there is the `.overlay.png` beside each photo.
+The rule is about **whose** folder it is, and there are two answers.
 
-**snappr never moves or deletes anything in the drop folder.** Files it does not
-recognise are ignored, not swept, not quarantined. `~/Downloads` is the user's real
-downloads folder with hundreds of unrelated files in it; treat it as read-only
-apart from the one file snappr adds.
+**The operator's folders are read-only apart from one file.** There is no `var/`,
+and the pipeline creates no directories and writes no databases or staging trees.
+`~/Downloads` is the only path outside the project it touches, and the only thing
+it ever writes there is the `.overlay.png` beside each photo.
 
-There is exactly one rename anywhere, and it is inside the app's own support
-folder: a `settings.json` that will not parse is moved to `settings.json.broken`
-before the defaults are used. That is not tidiness. The next `save()` would
-otherwise overwrite it - and the watch toggle saves on its first click - so
-without the rename the message telling the operator their overlays were reset
-would be announcing a loss that was already unrecoverable.
+**snappr never moves or deletes anything there.** Files it does not recognise are
+ignored, not swept, not quarantined. `~/Downloads` is the user's real downloads
+folder with hundreds of unrelated files in it; treat it as read-only apart from
+the one file snappr adds. That holds for the source photos and the prints alike -
+clearing a cell from the filmstrip deletes nothing the operator can see.
 
-Logs go to stdout.
+**The app's own support directories are snappr's to manage**, and it does create
+and delete inside them. `app_config_dir()` holds `settings.json`; `app_data_dir()`
+holds `index.json` and a `previews/` tree. Two writes there are worth knowing
+about, because both look like violations of the paragraph above and are not:
+
+- **The three preview JPEGs of a photo are deleted with it.** They exist only to
+  be drawn in the window, so they are snappr's - and they are *all* that is
+  snappr's. `Photo::owned_previews` in `src-tauri/src/photo.rs` is the list, and
+  its comment draws the line against the source and the print explicitly.
+- **A `settings.json` that will not parse is renamed to `settings.json.broken`**
+  before the defaults are used - the one rename anywhere in the codebase. That is
+  not tidiness. The next `save()` would otherwise overwrite it, and the watch
+  toggle saves on its first click, so without the rename the message telling the
+  operator their settings were reset would be announcing a loss that was already
+  unrecoverable. `Settings::load` in `src-tauri/src/settings.rs` says so at the
+  point where the order matters.
+
+**Logs go to stderr, and that is load-bearing rather than a detail.** Ruby's
+stdout carries protocol frames to the shell and nothing else, so a single stray
+`puts` desynchronises the caller's parser. `Snappr.logger` is built on `$stderr`
+for exactly this reason (`lib/snappr.rb`), and `Server#run`'s comment states the
+invariant. Under the CLI that just means log output on the terminal; under the app
+the shell pumps the child's stderr into its own console.
 
 ## Nothing is allowed to degrade the photo
 
@@ -320,6 +268,20 @@ Keep the guard. It was load-bearing when the output was `.overlay.jpg` - without
 it the watcher fed on itself, producing `IMG_1234.overlay.overlay.jpg` and on
 forever - and it becomes load-bearing again the moment anyone adds `png` to
 `extensions` or changes the output format back.
+
+**Previews never go in the drop folder**, and this one is not belt and braces -
+it is the sharper version of the guard above. The app derives three preview JPEGs
+per photo, and **`jpg` *is* a watched extension**. A preview sitting beside its
+original would therefore pass `candidate?`, be composited, produce previews of its
+own, and the pipeline would eat its own output forever. The overlay PNG gets away
+with living in the watched folder only because `png` is not watched; a JPEG would
+not. That is why `Preview.new` takes its destination as a **required argument with
+no default** that could quietly fall back to the drop folder, and why
+`Server#hello` uses `fetch("preview_dir")` rather than defaulting it. See the
+header of `lib/snappr/preview.rb`. Previews go to `app_data_dir()/previews`, which
+is also the one path `assetProtocol.scope` in `tauri.conf.json` allows the webview
+to read - the directory choice and the asset scope are a single decision, so
+moving one silently breaks the other.
 
 **Requiring `image_processing/vips` disables SVG loading.** Its `vips.rb` calls
 `Vips.block_untrusted(true)` at require time, and libvips marks `svgload` as an
@@ -605,22 +567,25 @@ Re-verify these if libvips is upgraded. They were established empirically.
   cap-height. If a future librsvg regresses this, put an explicit `dy="0.35em"`
   on the `<text>` element rather than adding code.
 - **vips `thumbnail` downcasts 16-bit to 8-bit.** A ushort input of 40000 comes
-  out uchar 156. This is why the crop is `extract_area` and not `resize_to_fill`.
-  The single most damaging thing anyone could "simplify" here.
+  out uchar 156. The single most damaging thing anyone could "simplify" here -
+  argued under "The crop is `extract_area`, never `resize_to_fill`".
 - `extract_area` preserves format exactly, and `composite` promotes an 8-bit
   overlay into a 16-bit photo with correct range scaling: white reaches 65535,
   text reaches 0, and the photo's own 40000 is untouched. So the 8-bit SVG render
   needs no manual scaling.
-- librsvg scales an SVG by its `viewBox`, so replacing that viewBox strands the
-  artwork at its authored coordinates. Measured: a bottom-2/5 band drawn at
-  2000x2960 rendered into 2724x4032 landed at x 0-73%, y 44-73%.
+- librsvg scales an SVG by its `viewBox`. Measured: a bottom-2/5 band drawn at
+  2000x2960 rendered into 2724x4032 landed at x 0-73%, y 44-73% - see "Never
+  overwrite the authored viewBox".
 - librsvg anti-aliases a shape edge that falls on a fractional coordinate across
-  up to three pixels (measured alpha 0, 7, 255 on consecutive rows). This is why
-  the photo is grown past the window, and why "the photo is unchanged" has to be
-  asserted against the overlay's alpha rather than an inset border.
-- The committed overlays' windows: landscape 74.6% of the width by full height,
-  portrait full width by 74.2% of the height. Both marked with a `<path>`, so
-  geometry parsing would have needed path and transform support.
+  up to three pixels (measured alpha 0, 7, 255 on consecutive rows) - see "Why
+  the photo is grown two pixels past the window".
+- Window shapes, measured from the files as they stand: `share/overlay-landscape
+  .svg` marks 74.16% of the width by full height; `sample/overlay-landscape.svg`
+  marks the whole frame, and `overlay_svg_test.rb` pins it at exactly
+  `{0, 0, 1, 1}`. Both mark it with a `<path>` under a transform, so geometry
+  parsing would have needed path and transform support. **There is no portrait
+  file in `share/` any more**, though `config/snappr.yml` still names one - so
+  the CLI prints portrait photos unbranded.
 - `icc_transform` keeps the alpha channel, and maps sRGB white to (255,255,255)
   in Display P3 - so achromatic branding is unaffected while coloured branding is
   corrected.
@@ -668,90 +633,67 @@ Re-verify these if libvips is upgraded. They were established empirically.
 
 ## What the app is allowed to say
 
-**Every message exists in exactly two versions, declared together.** The
-catalogues are `lib/snappr/problem.rb` (a `CATALOG` hash keyed by a stable code)
-and `src-tauri/src/problem.rs` (an enum, with one arm per problem in
-`Problem::parts`). Nothing writes a user-facing string anywhere else.
+**Every message exists in exactly two versions, declared together**: a plain
+sentence for the operator and a technical half for the console. The catalogues are
+`lib/snappr/problem.rb` and `src-tauri/src/problem.rs`, and nothing writes a
+user-facing string anywhere else. `problem_test.rb` asserts the rules against the
+table, so reword freely - the tests assert on **codes**, not wording.
 
-| half | goes to | may contain |
-|---|---|---|
-| `ui` | the window, and the first part of every log line | one or two plain sentences: what happened, then what to do |
-| `detail` | the console only | the exception class, the errno, the libvips text, full paths, ratios |
+Raising is the pipeline's half of this, so two rules apply on the Ruby side:
+anything snappr did not raise itself (`Vips::Error`, `KeyError`, a coercion
+failure) never shows its own text - `Problem.plain` substitutes a catalogue
+sentence and keeps the original for the log - and the mapping is by exception
+class, never by matching on a message.
 
-`ui` may not contain a class name, a hex literal, a backticked shell command, or
-any of this repo's own vocabulary - "sidecar", "handshake", "viewBox", "keying
-out", "index", "pipeline". A path appears in `ui` only when the operator has to go
-and look at it (the watched folder), never as decoration on a sentence that reads
-without it. `problem_test.rb` asserts all of this against the table, so reword
-freely - the tests assert on **codes**, not wording.
-
-This exists because it was got wrong. The app used to show
-`Snappr::Error: no #FF00FF photo window found in brand.svg`: `sidecar.rs` built
-its display string as `format!("{}: {}", class, message)`, and the message itself
-had been written at the raise site for whoever wrote the code. **Do not put the
-class back in front of the message** - `error.class` and `error.code` travel on the
-wire so the shell can *log* them, and `Server`'s frame comment says so.
-
-Anything snappr did not raise itself - `Vips::Error`, `KeyError`, a coercion
-failure - never shows its own text. `Problem.plain` substitutes the catalogue's
-`photo_unusable` sentence and keeps the original for the log. There is no
-message-matching anywhere: the mapping is by exception class, and an uncatalogued
-class falls through to one generic sentence rather than leaking.
-
-**Four channels, and each kind of problem has exactly one home.**
-
-| kind | channel | where it shows |
-|---|---|---|
-| about one photo | `photo.error` / `photo.warnings` | Stage callout + Try again, filmstrip dot, info line |
-| about the last thing the operator did | `problem` in `App.tsx`, a `{level, text}` | the info line, red for a failure and amber for a caveat |
-| discovered after the command returned | the `notice` Tauri event | the same info line |
-| watching asked for and not happening | `RuntimeStatus.watch_error` | the watch pill's third state |
-
-`RuntimeStatus.error` is **only ever set when `ready` is false**, because that is
-the only case `Stage` renders it. A watch failure put there was invisible, since at
-an event the Stage always has a photo in it. The pill is the home for that instead,
-and it needs its own field rather than sharing `notice`: the pill offers a retry,
-and must only offer it when a failed watch is the reason. Note the pill's failed
-state keeps `watch_enabled` true - the operator *asked* for watching - so its click
-handler retries rather than toggling, or it would pause.
-
-**A modal is only for a gesture that otherwise produced nothing at all.** Today
-that is exactly one thing: a drag & drop snappr refused. There is no cell, no
-spinner, no photo, and no line either - the info line belongs to the selected
-photo and the drop never made one. Everything else has somewhere on screen it
-belongs, and a modal per print would be intolerable at an event. It is the OS's
-alert (`app.dialog().message(...)` from Rust, `show` and never `blocking_show`),
-raised on the Rust side because a drop on the Dock icon can be what *launches* the
-app - a frontend modal cannot explain a drop from before the webview existed.
-
-`watcher::refusal` is the single implementation of the candidate rule and
-`is_candidate` delegates to it, so the filter and the explanation cannot drift.
-`Refusal` carries **no payload and does no I/O**: it runs on every fsevent in a
-folder with ~1.9k entries and refusal is the common answer there. `ingest_one`
-upgrades `Unknown` to `IsAFolder` with one `is_dir()`, on the single path the
-operator actually dropped.
+The four channels a message can travel on, which one each kind of problem belongs
+to, and why the class must never be prefixed onto the message, are in
+**`docs/desktop-app.md`**.
 
 ## Repo layout
 
 ```
-bin/snappr                CLI entrypoint
-lib/snappr.rb             Zeitwerk setup, the svgload unblock, Snappr.root/.config/.logger
-lib/snappr/problem.rb     THE MESSAGE CATALOGUE: every message, both halves
-lib/snappr/config.rb      config/snappr.yml, project-relative path resolution
-lib/snappr/exif.rb        camera, lens and exposure off the source header, for the UI
-lib/snappr/overlay_svg.rb renders an overlay at a pixel size, finds its #FF00FF window
-lib/snappr/overlay.rb     orientation, window fit, colour-managed composite, PNG save
-lib/snappr/watcher.rb     drop folder via the listen gem, candidate? guard, stability check
-lib/snappr/cli.rb         subcommand dispatch (Snappr::CLI)
-src-tauri/src/problem.rs  the shell's half of the catalogue, same two-version rule
-sample/overlay-landscape.svg the ONE overlay that ships - the landscape default,
-                             and the only entry in bundle.resources
-share/                       overlays for the CLI and for testing - NOT shipped,
-                             and never in bundle.resources
-test/fixtures/               the same design in several SVG dialects
-config/snappr.yml
-mise.toml
-test/
+THE PIPELINE (this document)
+  bin/snappr                CLI entrypoint - note `serve` is the DEFAULT subcommand
+  lib/snappr.rb             Zeitwerk setup, the svgload unblock, Snappr.root/.config/.logger
+  lib/snappr/problem.rb     THE MESSAGE CATALOGUE: every message, both halves
+  lib/snappr/config.rb      config/snappr.yml, project-relative path resolution
+  lib/snappr/exif.rb        camera, lens and exposure off the source header, for the UI
+  lib/snappr/overlay_svg.rb renders an overlay at a pixel size, finds its #FF00FF window
+  lib/snappr/overlay.rb     orientation, window fit, colour-managed composite, PNG save
+  lib/snappr/preview.rb     the three display JPEGs - NEVER into the watched folder
+  lib/snappr/server.rb      the NDJSON sidecar protocol; stdout is frames, stderr is log
+  lib/snappr/watcher.rb     drop folder via the listen gem, candidate? guard, stability check
+  lib/snappr/cli.rb         subcommand dispatch (Snappr::CLI)
+  config/snappr.yml         the CLI's config. The app never reads it.
+
+THE DESKTOP APP (docs/desktop-app.md)
+  src/                      React frontend. No stylesheet, by design - Radix Themes only
+  src-tauri/src/lib.rs      commands, events, drops, the index's lifetime
+  src-tauri/src/sidecar.rs  spawns Ruby, owns the wire protocol
+  src-tauri/src/runtime.rs  dev vs bundle layout, the child's environment
+  src-tauri/src/watcher.rs  the app's own watch; refusal() is the candidate rule
+  src-tauri/src/settings.rs settings.json, and the hand-written Overlay Deserialize
+  src-tauri/src/photo.rs    one record per photo, and the index that outlives the session
+  src-tauri/src/mac.rs      the share sheet and the native print
+  src-tauri/src/problem.rs  the shell's half of the catalogue, same two-version rule
+  src-tauri/Info.plist      CFBundleDocumentTypes - why Dock drops work at all
+
+THE BUNDLED RUNTIME (docs/bundled-runtime.md)
+  bin/build-*               Ruby, libvips, its closure, the gems. Output goes to build/
+  bin/verify-bundle         the gate: nothing may come from Homebrew
+  mise.toml                 pins Ruby, and the entry point operators type
+
+OVERLAYS
+  sample/overlay-landscape.svg  the ONE overlay that ships - the landscape default,
+                                and the only entry in bundle.resources
+  share/*.svg                   overlays for the CLI and for testing - NOT shipped,
+                                and never in bundle.resources
+  share/*.orig.svg              the original hand-written overlays, whose geometry is
+                                percentages inside an absolute viewBox. Kept as a
+                                second dialect to render against - see "Never
+                                overwrite the authored viewBox". Not branding, and
+                                not the current design.
+  test/fixtures/                the same design in several SVG dialects
 ```
 
 Keep the decision logic in Ruby and the geometry in the SVGs. `Snappr::OverlaySvg`
