@@ -307,10 +307,21 @@ From `tauri.conf.json`, the settings that are decisions rather than taste:
 - A locked-down CSP, with `style-src 'unsafe-inline'` as the one concession to
   Radix Themes.
 
-The window-state plugin restores **size and position only**. The default
-`StateFlags::all()` would also restore maximized, fullscreen and hidden, and a
-kiosk quit while minimised should come back as a plain visible window. The
-single-instance plugin must be registered first, per its own documentation.
+The window-state plugin restores the frame the operator set up **and nothing
+else** - a window quit while hidden comes back visible, and decorations stay
+whatever the config says. So the flags are `SIZE | POSITION | MAXIMIZED |
+FULLSCREEN`, never `StateFlags::all()`.
+
+**`MAXIMIZED` and `FULLSCREEN` are in that list for the *size*, not because a
+kiosk needs to reopen zoomed**, and the reason is a macOS quirk worth knowing:
+`isZoomed` is derived from the frame rather than from a gesture, so a window
+merely dragged out to fill the screen - the obvious kiosk setup - reports as
+maximized. The plugin then skips saving the size while still tracking every move,
+and the file ends up with a new position beside a stale size, so the window
+reopens small at the right place. Recording the two states is what makes the saved
+frame coherent again. `lib.rs` carries the full argument at the registration.
+
+The single-instance plugin must be registered first, per its own documentation.
 
 The **selection** is restored too, but it lives in the index rather than in
 settings, because it is only meaningful against those records and is dropped with
@@ -542,7 +553,8 @@ Each is argued at its own site; this is an index, not the argument.
 | deriving `Deserialize` for `Overlay` (`settings.rs`) | a legacy `null` takes down the whole settings file |
 | `#[serde(untagged)]` on `Overlay` | every parse error becomes "did not match any variant" |
 | removing the `.broken` rename, or moving it after the message | announces a loss that is already unrecoverable |
-| `StateFlags::all()` on the window-state plugin | restores fullscreen and hidden windows |
+| `StateFlags::all()` on the window-state plugin | restores hidden windows and decorations too |
+| dropping `MAXIMIZED`/`FULLSCREEN` from those flags | a dragged-to-fill window reopens small, at the right position |
 | making `Photo::exif` non-`Option` | drops the whole session on the first launch after an update |
 | dropping `Stored::Legacy` | the same, for indexes already on disk |
 | `blocking_show` for the refusal alert | freezes the window - it runs on the event thread |
