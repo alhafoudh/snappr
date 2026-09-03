@@ -117,9 +117,20 @@ pub fn share(window: &WebviewWindow, path: &Path, anchor: Anchor) -> Result<(), 
 /// 283.46 x 419.53 pt resolves to the first, because that is the driver's default,
 /// and the print comes back with a white border. The size is only a fallback for
 /// a printer that has no paper of that name at all.
-pub fn print(window: &WebviewWindow, path: &Path, landscape: bool, paper: &str) -> Result<(), String> {
+///
+/// `title` names the job. Without one AppKit calls it "Untitled", because the
+/// operation is over a bare view rather than an `NSDocument` - so the queue and
+/// the panel's Save as PDF both offer that instead of the photo's own name.
+pub fn print(
+    window: &WebviewWindow,
+    path: &Path,
+    landscape: bool,
+    paper: &str,
+    title: &str,
+) -> Result<(), String> {
     let path = path.to_path_buf();
     let paper = paper.to_string();
+    let title = title.to_string();
     // Everything below the dispatch runs after this function has returned Ok, so
     // it cannot report through the Err. Two things in there are worth telling the
     // operator - an unreadable PNG and a paper the printer does not have - and
@@ -201,6 +212,9 @@ pub fn print(window: &WebviewWindow, path: &Path, landscape: bool, paper: &str) 
             view.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
 
             let operation = NSPrintOperation::printOperationWithView_printInfo(&view, &info);
+            if !title.is_empty() {
+                operation.setJobTitle(Some(&NSString::from_str(&title)));
+            }
 
             // The default panel hides Paper Size and Orientation, which is exactly
             // what the operator needs to see to confirm "Postcard Borderless" is

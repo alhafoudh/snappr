@@ -32,7 +32,7 @@ import type { OverlayCard, Orientation, Settings } from "../types";
  * photo keeps most of the window; the rail is one icon column. Passed as Radix
  * props, which are typed "enum | string" for exactly this.
  */
-export const PANEL_WIDTH = "216px";
+export const PANEL_WIDTH = "262px";
 export const RAIL_WIDTH = "36px";
 
 /**

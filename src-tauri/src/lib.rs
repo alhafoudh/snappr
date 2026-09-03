@@ -810,7 +810,11 @@ fn share_photo(
 fn print_photo(window: WebviewWindow, state: State<AppState>, source: PathBuf) -> Result<(), String> {
     let (destination, landscape) = destination_of(&state, &source)?;
     let paper = state.settings.lock().unwrap().print_paper_name.clone();
-    mac::print(&window, &destination, landscape, &paper)
+    // The job is named after the SOURCE, not the PNG being printed: the
+    // destination's stem is `IMG_1234.overlay`, and the operator thinks of the
+    // print as the photo they dropped.
+    let title = source.file_stem().unwrap_or_default().to_string_lossy();
+    mac::print(&window, &destination, landscape, &paper, &title)
 }
 
 /// Finder, with the file selected.
