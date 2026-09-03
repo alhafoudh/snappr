@@ -8,7 +8,7 @@ image-quality invariants; this file owns everything around it.
 argued at the place it lives, with the bug it prevents and the measurement
 attached - `lib.rs`, `settings.rs`, `photo.rs`, `overlays.rs`, `mac.rs`, and
 core's `watcher.rs`, `worker.rs` and `preview.rs` all carry their own comments, as
-do `usePhotos.ts`, `ipc.ts` and `App.tsx`. This document deliberately does not
+do `usePhotos.ts`, `ipc.ts`, `confirm.ts` and `App.tsx`. This document deliberately does not
 restate them. What it records is the material that spans files and therefore sits
 in no file's comments, plus the map of which file to open.
 
@@ -402,7 +402,8 @@ would call it the wrong kind of file.
 single-instance plugin is not involved, and a drop on the Dock icon **can be what
 launches the app** - which is why the refusal alert is the OS's own and is raised
 from Rust. A frontend modal cannot explain a drop from before the webview existed.
-`show`, never `blocking_show`: this runs on the event thread.
+`show`, never `blocking_show`: this runs on the event thread. It is also the one
+alert that may end up with no parent window, for the same reason - see "Modals".
 
 The Dock only accepts a drop because `src-tauri/Info.plist` declares the photo
 types under `CFBundleDocumentTypes`, by UTI, with the extensions as a fallback for
@@ -747,7 +748,10 @@ clone; `mise run app` is what builds the bundle with libvips inside it.
 
 **Every message exists in exactly two versions, declared together.** There is one
 catalogue, `crates/snappr-core/src/problem.rs` - an enum with one arm per problem
-in `Problem::parts`. Nothing writes a user-facing string anywhere else.
+in `Problem::parts`. Nothing writes a user-facing string anywhere else, with one
+exception that has its own one place: the three confirmation prompts, in
+`src/confirm.ts` - a question is a different shape from a message, having no
+console half and needing a button label. See "Modals" below.
 `src-tauri/src/problem.rs` is a shim over it that adds the one thing core cannot
 do: delivering a message to the window, which needs an `AppHandle`.
 
@@ -805,14 +809,55 @@ is what the operator asked for, which is not the same as what is happening. Sayi
 and `start_watching_noted` exists so that every path which turns watching on - boot,
 the pill, a change of folder - cannot tell it again.
 
-**A modal is only for a gesture that otherwise produced nothing at all.** Today
-that is exactly one thing: a drag & drop snappr refused. There is no cell, no
-spinner, no photo, and no line either - the info line belongs to the selected
-photo and the drop never made one. Everything else has somewhere on screen it
-belongs, and a modal per print would be intolerable at an event. It is the OS's
-alert (`app.dialog().message(...)` from Rust, `show` and never `blocking_show`),
-raised on the Rust side because a drop on the Dock icon can be what *launches* the
-app - a frontend modal cannot explain a drop from before the webview existed.
+### Modals
+
+**Two things earn one, and nothing else does.** A modal per print would be
+intolerable at an event, and every other kind of message has somewhere on screen
+it belongs - the four channels above are those places.
+
+| earns a modal | why | there are |
+|---|---|---|
+| a gesture that produced **nothing at all** | there is nowhere for the message to go | one: a drag & drop snappr refused |
+| destroying something the **same control cannot undo** | the operator has to be able to say no | three: Clear All, Clear, Remove an overlay |
+
+The first is `explain_refusals` in `lib.rs`. There is no cell, no spinner, no
+photo and no line either - the info line belongs to the selected photo and the
+drop never made one. It *tells* rather than asks, and it is the one modal that is
+not a question.
+
+The second is the three destructive gestures, and **all three go through one
+question**: `ask` in `lib.rs` raises it, and `src/confirm.ts` is the only file
+that spells one. Only the title, the sentence and the confirm label come from the
+frontend; the severity, the "Cancel" label and the sheet are fixed in `ask`.
+Clearing does not delete a photo or a print and removing an overlay does not
+delete the design - so **every prompt says what is *not* lost**, because "Clear"
+and "Remove" both read like deletion.
+
+Clear used not to ask. The argument was that dropping the photo back on the
+window undoes it, which is true and is not an undo: it is a step the operator has
+to think of, with the file they have just lost sight of, and Clear sits one item
+away from Clear All on the same menu.
+
+**Every dialog in the app is raised from Rust**, and the check is that
+`capabilities/default.json` grants **no `dialog:*` permission** - so the two
+pickers are commands too (`pick_watch_dir`, `pick_overlay_file`), not
+`plugin-dialog`'s `open`. Two reasons it is that side rather than the webview's:
+a drop on the Dock icon can be what *launches* the app, so a frontend modal
+cannot explain a drop from before the webview existed; and one place raising
+every alert is the only way `.parent(&window)` is not forgotten on one of them.
+
+**`.parent(&window)` is what makes an alert a sheet** on the window instead of a
+panel floating mid-screen. `plugin-dialog`'s own command sets it, so the
+frontend's `confirm` had it for free and moving to Rust would have silently lost
+it. `explain_refusals` never had it and now does - when there is a window at all,
+since a Dock drop can arrive before there is one.
+
+**`show` versus `blocking_show` differs between the two, and the difference is
+the thread.** `explain_refusals` runs on the event thread, where blocking freezes
+the window, so it uses `show`. `ask` and the two pickers are `async` commands, so
+Tauri runs them on the async runtime and blocking holds nothing - which is what
+`plugin-dialog`'s own `message` command does. Bridging their callbacks through a
+channel to use `show` would be ceremony for nothing.
 
 `watcher::refusal` is the single implementation of the candidate rule and
 `is_candidate` delegates to it, so the filter and the explanation cannot drift.
@@ -841,6 +886,8 @@ Each is argued at its own site; this is an index, not the argument.
 | dropping `#[serde(default)]` from `Photo::printed_at` | the same, and it silently retypes the field as required in `src/bindings/Photo.ts` |
 | dropping `Stored::Legacy` | the same, for indexes already on disk |
 | `blocking_show` for the refusal alert | freezes the window - it runs on the event thread |
+| `show` plus a channel instead of `blocking_show` in `ask` | ceremony for nothing - it is `async`, so it holds no thread worth keeping |
+| dropping `.parent(&window)` from any alert | it stops being a sheet on the window and floats mid-screen |
 | doing image work in a command body | they are synchronous, so that is the event thread |
 | `Webview::print()` instead of `mac::print` | rasterises the photo through WKWebView |
 | setting the paper by size rather than PPD name | prints bordered on a SELPHY |
@@ -865,3 +912,5 @@ Each is argued at its own site; this is an index, not the argument.
 | more than one worker thread | four 12MP composites at once, each holding a 25 MB output |
 | hand-editing `src/bindings/` | it is generated; `cargo test` overwrites it |
 | naming a command or an event outside `src/ipc.ts` | the drift the generated bindings exist to end |
+| spelling a confirmation prompt outside `src/confirm.ts` | the same drift, in the strings the operator actually reads |
+| granting `dialog:*` in the capability file again | a dialog is being raised from the webview, so one of them will lose its parent window |

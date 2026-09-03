@@ -2,9 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Flex, Grid } from "@radix-ui/themes";
 import { Menu, type MenuOptions } from "@tauri-apps/api/menu";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { confirm, open } from "@tauri-apps/plugin-dialog";
 
 import { usePhotos } from "./usePhotos";
+import { ask } from "./confirm";
 import { useNow } from "./useNow";
 import { Toolbar, TOOLBAR_HEIGHT } from "./components/Toolbar";
 import { Stage } from "./components/Stage";
@@ -12,6 +12,7 @@ import { Actions } from "./components/Actions";
 import { Filmstrip } from "./components/Filmstrip";
 import { OverlayPanel, PANEL_WIDTH, RAIL_WIDTH } from "./components/OverlayPanel";
 import { cmd, on, sentence } from "./ipc";
+import { baseName } from "./naming";
 import type { Anchor, Drag, Notice, Orientation, OverlayCard, Photo, View } from "./types";
 
 export default function App() {
@@ -297,6 +298,8 @@ export default function App() {
 
   const clearOne = useCallback(
     async (photo: Photo) => {
+      if (!(await ask("clearPhoto", baseName(photo.source)))) return;
+
       setProblem(null);
       try {
         await clearPhoto(photo.source);
@@ -322,19 +325,16 @@ export default function App() {
     [setPrinted],
   );
 
-  // Clearing one cell asks nothing: it is undone by dropping the photo back on the
-  // window. Clearing the strip at an event throws away the whole session's worth of
-  // cells at once, so that one asks first. Neither deletes anything on disk, and
-  // the wording says so - the point of clearing is a filmstrip the operator can see
-  // the current queue in, not housekeeping.
+  // Both clears ask, and Clear used not to - the argument for letting it through
+  // was that dropping the photo back on the window undoes it. That is true and it
+  // is not an undo: it is a step the operator has to think of, with the file they
+  // just lost sight of, and Clear sits one item away from Clear All on the same
+  // menu. Neither deletes anything on disk, and both prompts say so - the point of
+  // clearing is a filmstrip showing the current queue, not housekeeping.
   const clearEverything = useCallback(async () => {
     const count = ordered.length;
     if (count === 0) return;
-    const ok = await confirm(
-      `Clear ${count} photo${count === 1 ? "" : "s"} from the filmstrip? The photos and any prints already made stay on disk.`,
-      { title: "Clear the filmstrip", kind: "warning", okLabel: "Clear All", cancelLabel: "Cancel" },
-    );
-    if (!ok) return;
+    if (!(await ask("clearAll", count))) return;
 
     setProblem(null);
     try {
@@ -387,8 +387,8 @@ export default function App() {
   };
 
   const pickWatchDir = async () => {
-    const chosen = await open({ directory: true, multiple: false, defaultPath: settings?.watch_dir });
-    if (typeof chosen !== "string") return;
+    const chosen = await cmd.pickWatchDir(settings?.watch_dir ?? null);
+    if (chosen === null) return;
     setProblem(null);
     try {
       await changeWatchDir(chosen);
@@ -434,8 +434,8 @@ export default function App() {
   // afterwards. An add that quietly took a slot would overwrite a choice they had
   // already made.
   const pickOverlay = async () => {
-    const chosen = await open({ multiple: false, filters: [{ name: "SVG", extensions: ["svg"] }] });
-    if (typeof chosen !== "string") return;
+    const chosen = await cmd.pickOverlayFile();
+    if (chosen === null) return;
     setProblem(null);
     try {
       await addOverlay(chosen);
@@ -444,7 +444,11 @@ export default function App() {
     }
   };
 
+  // `card.name` rather than a name derived here: it is computed in `Overlay::label`
+  // on the Rust side, so an overlay is called one thing wherever the app names it.
   const forgetOverlay = async (card: OverlayCard) => {
+    if (!(await ask("removeOverlay", card.name))) return;
+
     setProblem(null);
     try {
       await removeOverlay(card.overlay);

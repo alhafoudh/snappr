@@ -790,6 +790,14 @@ catalogue**, `crates/snappr-core/src/problem.rs`, and nothing writes a user-faci
 string anywhere else. `tests/problem_rules.rs` asserts the rules against the whole
 table, so reword freely - the tests assert on **codes**, not wording.
 
+**A question is not a message, and has its own one place**: `src/confirm.ts`, the
+three confirmation prompts. It stays out of the catalogue because it is not the
+same shape - a `Problem` is two halves, one for the operator and one for the
+console, and a prompt has no console half and needs a button label the catalogue
+has no field for. The rule it does share is the one that matters: there is exactly
+one file to open, and the same wording constraints apply. See "Modals" in
+`docs/desktop-app.md`.
+
 There were two catalogues, one per language, with six problems stated twice in
 slightly different words and comments pointing at each other to keep them in step.
 The merge was safe for the same reason the split survived: `Problem::code` is
@@ -836,7 +844,9 @@ THE DESKTOP APP (docs/desktop-app.md)
   src/                      React frontend. No stylesheet, by design - Radix Themes only
   src/bindings/             GENERATED from the Rust structs by `cargo test`
   src/ipc.ts                the only file that names a command or an event
-  src-tauri/src/lib.rs      commands, events, drops, the index's lifetime
+  src/confirm.ts            the only file that spells a yes/no question
+  src-tauri/src/lib.rs      commands, events, drops, the index's lifetime,
+                            and `ask` - the one alert every confirm goes through
   src-tauri/src/settings.rs settings.json, the hand-written Overlay Deserialize, and
                             the overlay library the panel shows
   src-tauri/src/overlays.rs the panel's cards and their PNGs - snappr's own files

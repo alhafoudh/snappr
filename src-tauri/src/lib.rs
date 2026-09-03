@@ -25,7 +25,7 @@ use snappr_core::overlay::Overlay as Pipeline;
 use snappr_core::watcher::{self, Arrival, Refusal};
 use snappr_core::worker::Worker;
 use tauri::{AppHandle, DragDropEvent, Emitter, Manager, State, WebviewWindow, WindowEvent};
-use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_window_state::StateFlags;
 
 use overlays::OverlayCard;
@@ -345,21 +345,6 @@ fn ingest_one(app: &AppHandle, path: PathBuf) -> Result<(), (PathBuf, Refusal)> 
     Ok(())
 }
 
-/// Says why a drop was refused, in a native alert.
-///
-/// A modal, and the only one in the app apart from Clear All's confirm, because a
-/// refused drop is the one failure that otherwise produces *nothing at all*: no
-/// cell, no spinner, no photo, and no line either - the problem line belongs to
-/// the selected photo and this drop never created one. Everything else that can
-/// go wrong has somewhere on screen it belongs.
-///
-/// The OS's alert rather than a Radix dialog, for the reason CLAUDE.md gives for
-/// the context menus, plus one this side: a drop on the Dock icon can be what
-/// *launches* the app, and a frontend-rendered modal cannot explain a drop that
-/// happened before the webview existed.
-///
-/// `show`, never `blocking_show`: this runs on the event thread, and blocking
-/// there freezes the window.
 /// The catalogue entry for one refusal.
 fn refusal_problem(path: &Path, refusal: Refusal, accepted: &str) -> Problem {
     let file = path
@@ -385,6 +370,18 @@ fn refusal_problem(path: &Path, refusal: Refusal, accepted: &str) -> Problem {
     }
 }
 
+/// Says why a drop was refused, in a native alert.
+///
+/// The one modal that is not a question. `ask` covers those; this one *tells*,
+/// because a refused drop is the failure that otherwise produces **nothing at
+/// all**: no cell, no spinner, no photo, and no line either - the problem line
+/// belongs to the selected photo and this drop never created one. Everything
+/// else that can go wrong has somewhere on screen it belongs.
+///
+/// The OS's alert rather than a Radix dialog, for the reason CLAUDE.md gives for
+/// the context menus, plus one this side: a drop on the Dock icon can be what
+/// *launches* the app, and a frontend-rendered modal cannot explain a drop that
+/// happened before the webview existed.
 fn explain_refusals(app: &AppHandle, refused: Vec<(PathBuf, Refusal)>) {
     let state = app.state::<AppState>();
     let accepted = {
@@ -413,13 +410,25 @@ fn explain_refusals(app: &AppHandle, refused: Vec<(PathBuf, Refusal)>) {
     };
 
     let title = if refused.len() == 1 { "Nothing to print" } else { "Some files were skipped" };
-    app.dialog()
+    let mut dialog = app
+        .dialog()
         .message(body)
         .title(title)
         // A warning, not an error: the operator did nothing wrong, snappr just
         // cannot use what they dropped.
-        .kind(MessageDialogKind::Warning)
-        .show(|_| {});
+        .kind(MessageDialogKind::Warning);
+
+    // Parented so this is a sheet on the window, the way `ask` is. A drop on the
+    // Dock icon can be what *launches* the app, though, so there is not always a
+    // window to hang one from - unparented then, which is the old behaviour and
+    // the only thing available.
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.parent(&window);
+    }
+
+    // `show`, never `blocking_show`: unlike `ask` this runs on the event thread,
+    // and blocking there freezes the window.
+    dialog.show(|_| {});
 }
 
 fn start_watching(app: &AppHandle, settings: &Settings) -> Result<(), Payload> {
@@ -938,6 +947,78 @@ fn reveal_photo(state: State<AppState>, source: PathBuf) -> Result<(), Payload> 
     reveal(&destination)
 }
 
+/// Asks the operator a yes/no question in the OS's own alert, and answers with
+/// what they clicked.
+///
+/// **The single place a question is put to the operator.** The wording arrives
+/// from `src/confirm.ts`, which is the only place a prompt is spelled;
+/// everything else about the alert is fixed here on purpose. `Warning` because a
+/// confirm is only ever asked for something destructive, and "Cancel" because
+/// that is the label a macOS user reads as "get me out of this" - a call site
+/// free to invent "No" or "Keep" is a call site that eventually will.
+///
+/// `.parent(&window)` is what makes it a document-modal sheet on the window
+/// rather than a panel floating in the middle of the screen. The frontend's
+/// `plugin-dialog` `confirm` used to get this for free, because the plugin's own
+/// command sets it (`tauri-plugin-dialog/src/commands.rs`), and dropping it on
+/// the way over here would have been a silent regression in how native the app
+/// looks.
+///
+/// **`blocking_show` is right here, and the rule it looks like it breaks does not
+/// apply.** `explain_refusals` below must never block, because it runs on the
+/// event thread. This is an `async` command, so Tauri runs it on the async
+/// runtime and the event thread is never held - which is exactly what
+/// `tauri-plugin-dialog`'s own `message` command does. Do not "fix" this into
+/// `show` with a channel to bridge the callback: that is ceremony for nothing.
+///
+/// Returns a bare `bool` rather than the `Result<_, Payload>` every other
+/// fallible command returns, because nothing here can fail. A sheet dismissed
+/// with Escape is already `false`.
+#[tauri::command]
+async fn ask(window: WebviewWindow, title: String, question: String, confirm: String) -> bool {
+    window
+        .dialog()
+        .message(question)
+        .title(title)
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(confirm, "Cancel".into()))
+        .parent(&window)
+        .blocking_show()
+}
+
+/// The folder picker for the watch folder.
+///
+/// Raised from here rather than from the webview for the reason `ask` is: every
+/// dialog in the app comes from this side, and `capabilities/default.json`
+/// granting no `dialog:*` permission at all is what keeps that checkable.
+/// `async` for the same reason too - see `ask`.
+#[tauri::command]
+async fn pick_watch_dir(window: WebviewWindow, current: Option<PathBuf>) -> Option<PathBuf> {
+    let mut dialog = window.dialog().file().set_parent(&window);
+    // Opening in the folder being replaced, which is where the operator is
+    // almost always about to navigate away from anyway. `is_dir` rather than
+    // handing the path over unchecked: the usual reason to be changing the folder
+    // is that the old one has gone, and AppKit silently ignores a directory URL
+    // that does not resolve, so the guard is what makes "then just open wherever
+    // the panel would" a decision rather than a coincidence.
+    if let Some(current) = current.filter(|p| p.is_dir()) {
+        dialog = dialog.set_directory(current);
+    }
+    dialog.blocking_pick_folder().and_then(|p| p.into_path().ok())
+}
+
+/// The file picker for adding an overlay to the panel. See `pick_watch_dir`.
+#[tauri::command]
+async fn pick_overlay_file(window: WebviewWindow) -> Option<PathBuf> {
+    window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .add_filter("SVG", &["svg"])
+        .blocking_pick_file()
+        .and_then(|p| p.into_path().ok())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1006,6 +1087,9 @@ pub fn run() {
             print_photo,
             set_photo_printed,
             reveal_photo,
+            ask,
+            pick_watch_dir,
+            pick_overlay_file,
         ])
         // Files dropped on the window. Tauri owns drag-and-drop (dragDropEnabled is
         // on, the default), so the webview never sees the drop and cannot navigate

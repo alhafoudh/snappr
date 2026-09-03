@@ -1,12 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "What the snappr window is allowed to ask the shell for.",
+  "description": "What the snappr window is allowed to ask the shell for. No dialog:* permission, deliberately: every dialog is raised from Rust, so a dialog permission needed here means one is being raised from the wrong side.",
   "windows": ["main"],
-  "permissions": [
-    "core:default",
-    "core:window:allow-start-dragging",
-    "dialog:allow-open",
-    "dialog:allow-confirm"
-  ]
+  "permissions": ["core:default", "core:window:allow-start-dragging"]
 }

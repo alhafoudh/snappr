@@ -64,8 +64,30 @@ export const cmd = {
   selectedPhoto: () => invoke<string | null>("selected_photo"),
   setSelected: (source: string) => invoke<void>("set_selected", { source }),
 
+  /**
+   * Puts a yes/no question to the operator in a native sheet, and resolves to
+   * what they clicked. The wording comes from `src/confirm.ts`, which is the
+   * only file that spells one - call `ask` there, not this.
+   *
+   * Raised on the Rust side, like every other dialog in the app, which is why
+   * `capabilities/default.json` grants no `dialog:*` permission to the webview.
+   */
+  ask: (title: string, question: string, confirm: string) =>
+    invoke<boolean>("ask", { title, question, confirm }),
+
   getSettings: () => invoke<Settings>("get_settings"),
   setWatchDir: (dir: string) => invoke<Settings>("set_watch_dir", { dir }),
+  /**
+   * The folder picker, opening in `current` when it still exists. Resolves to
+   * null when the operator dismissed it.
+   *
+   * `current` is `string | null` rather than optional so the caller has to pass
+   * something: `JSON.stringify` drops an `undefined` value, and an argument that
+   * reaches Rust as an absent key rather than a null is a difference nobody
+   * wants to have to remember.
+   */
+  pickWatchDir: (current: string | null) =>
+    invoke<string | null>("pick_watch_dir", { current }),
   setWatching: (enabled: boolean) => invoke<Settings>("set_watching", { enabled }),
   setPanelCollapsed: (collapsed: boolean) =>
     invoke<Settings>("set_panel_collapsed", { collapsed }),
@@ -74,6 +96,8 @@ export const cmd = {
   setOverlay: (orientation: Orientation, choice: Overlay) =>
     invoke<Settings>("set_overlay", { orientation, choice }),
   addOverlay: (path: string) => invoke<Settings>("add_overlay", { path }),
+  /** The SVG picker. Null when the operator dismissed it. */
+  pickOverlayFile: () => invoke<string | null>("pick_overlay_file"),
   removeOverlay: (overlay: Overlay) => invoke<Settings>("remove_overlay", { overlay }),
   revealOverlay: (overlay: Overlay) => invoke<void>("reveal_overlay", { overlay }),
 
