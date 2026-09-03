@@ -21,6 +21,7 @@ export default function App() {
     runtime,
     selected,
     overlays,
+    unseen,
     setSelected,
     reprocess,
     clearPhoto,
@@ -514,6 +515,7 @@ export default function App() {
         <Filmstrip
           photos={ordered}
           selected={selected}
+          unseen={unseen}
           settings={settings}
           runtime={runtime}
           count={ordered.length}

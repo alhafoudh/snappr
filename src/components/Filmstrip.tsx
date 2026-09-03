@@ -27,7 +27,15 @@ const thumb = { width: "100%", height: "100%", objectFit: "contain", display: "b
  * selection; status is a dot in the corner. An earlier version put both on the
  * border, and a selected photo that had a warning simply showed no selection.
  */
-function Cell({ photo, onMenu }: { photo: Photo; onMenu: (event: React.MouseEvent) => void }) {
+function Cell({
+  photo,
+  unseen,
+  onMenu,
+}: {
+  photo: Photo;
+  unseen: boolean;
+  onMenu: (event: React.MouseEvent) => void;
+}) {
   const status = photo.status === "failed" ? "failed" : photo.warnings.length > 0 ? "warned" : null;
 
   return (
@@ -77,6 +85,21 @@ function Cell({ photo, onMenu }: { photo: Photo; onMenu: (event: React.MouseEven
           {/* min-width 0 on the column above is what lets this truncate rather
               than widening the cell to fit the filename. */}
           <Text size="1" truncate>
+            {/* A photo that arrived while the operator was elsewhere in the strip
+                and has not been looked at since. It goes before the name rather
+                than in the frame because both of the frame's top corners are
+                already taken - orientation left, status right - and because it is
+                a fact about the file, which is what the name is.
+
+                Inside the same `Text` rather than a Flex row beside it, so the
+                name keeps one truncating text box and the ellipsis still lands in
+                the right place. `verticalAlign` is inline because Radix has no
+                prop for it and a 15px icon sits high on a size-1 line. */}
+            {unseen && (
+              <Text as="span" color="blue" aria-label="not looked at yet">
+                <DotFilledIcon style={{ verticalAlign: "middle" }} />
+              </Text>
+            )}
             {photo.name}
           </Text>
         </Flex>
@@ -182,6 +205,7 @@ function WatchCell({
 export function Filmstrip({
   photos,
   selected,
+  unseen,
   settings,
   runtime,
   count,
@@ -193,6 +217,8 @@ export function Filmstrip({
 }: {
   photos: Photo[];
   selected: string | null;
+  /** Sources that arrived unlooked-at; their cells carry a blue dot. */
+  unseen: ReadonlySet<string>;
   settings: Settings | null;
   runtime: RuntimeStatus;
   count: number;
@@ -235,7 +261,12 @@ export function Filmstrip({
               aria-label="Photos"
             >
               {photos.map((photo) => (
-                <Cell key={photo.source} photo={photo} onMenu={onCellMenu(photo)} />
+                <Cell
+                  key={photo.source}
+                  photo={photo}
+                  unseen={unseen.has(photo.source)}
+                  onMenu={onCellMenu(photo)}
+                />
               ))}
             </RadioCards.Root>
           </Box>

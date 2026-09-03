@@ -131,19 +131,44 @@ is derived from it, so reversing is the same ordering at full resolution with no
 ties and no dependence on clock granularity. A reprocessed photo keeps its slot
 either way, which is why `process` preserves its `added_at`.
 
-**An arrival takes the selection only from the head of the strip.** Following is
-the kiosk's point - a photo AirDropped while nobody is at the keyboard has to show
-itself - but it must not yank the operator out of a photo they navigated to, and it
-used to: the selection moved under them and, because the strip's arrow keys carry
-on from wherever focus is, their place was gone. `usePhotos` keeps an `atHead` ref
-and only follows when the selection is still the newest record.
+**snappr picks a photo only when there is none to take away.** The first arrival of
+a session shows itself - an app whose out-of-the-box behaviour is "nothing visibly
+happens" gives the operator nothing to react to - and every arrival after that lands
+quietly. `usePhotos` keeps a `nothingSelected` ref and follows on that alone.
 
-The test is "at the head" rather than "not touching the keyboard" because it
-re-arms itself by arrowing back to the newest cell, reads the same for the mouse and
-the keyboard, and leaves the operator at the head after each followed arrival, so an
-unattended run behaves exactly as it always did. **Focus was the other candidate and
-is wrong**: clicking a cell leaves focus inside the strip for the rest of the
-session, so a focus test would switch following off for good on the first click.
+It used to follow every arrival, which yanked the operator out of whatever they were
+working on: the selection moved under them and, because the strip's arrow keys carry
+on from wherever focus is, their place went with it.
+
+**Two narrower tests were tried on the way here and both are wrong**, which is worth
+recording because both read as obviously right:
+
+- **"at the head of the strip"** - follow only while the selection is the newest
+  photo. It is **self-perpetuating**: following an arrival makes that arrival the
+  newest *and* selects it, so the test is true again immediately and the chain never
+  breaks. An operator who does not deliberately arrow backwards sees the old
+  behaviour completely unchanged, which is how it was caught - it fires in the case
+  you check in your head and never in the case the kiosk is actually used in.
+- **"focus is inside the strip"** - clicking a cell leaves focus there for the rest
+  of the session, so following would switch off for good on the first click.
+
+**So an arrival is either followed or marked, never both and never neither.** A
+photo that lands without taking the selection goes into `unseen` and its cell draws
+a blue dot before the filename; selecting it is looking at it, and the dot goes.
+Following *was* the notification, and once an arrival can land quietly something has
+to say it happened - otherwise the operator's decision to stay on the photo in hand
+quietly costs them the next one. The count in the zeroth cell is not that something:
+it says how many, never which.
+
+`unseen` is session state and is deliberately **not** in the index. It is a fact
+about what this operator has looked at rather than about the photo, and persisting it
+would mean deciding what a restored strip is - every answer being wrong, since a
+whole strip of dots is a wall of blue and no dots at all silently discards the mark
+on the one photo they had not got to. It is cleared by selection through the same
+reconcile-against-the-selection rule the selection itself uses, because the ways in
+are the keyboard, the mouse, a right-click, a retry and the reconciliation, and a dot
+still sitting on the photo that fills the window is the one state that reads as a
+bug.
 
 ## The preview tier
 
@@ -791,7 +816,8 @@ Each is argued at its own site; this is an index, not the argument.
 | sorting in `usePhotos` instead of `App.ordered` | inverts the newest-photo fallbacks |
 | sorting `ordered` on `added_at` instead of reversing | same-second arrivals read backwards, and the arrows walk that |
 | dropping the focus move in `App.tsx`'s `[selected]` effect | arrows step from the cell focus was left on, not the selected one |
-| following every arrival regardless of `atHead` | an arrival yanks the operator out of the photo they navigated to |
+| following every arrival regardless of `nothingSelected` | an arrival yanks the operator out of the photo they are working on |
+| gating the follow on the selection being at the head of the strip | self-perpetuating, so it never stops following |
 | `loop` left at Radix's default on the strip | one arrow path wraps and the other clamps |
 | more than one worker thread | four 12MP composites at once, each holding a 25 MB output |
 | hand-editing `src/bindings/` | it is generated; `cargo test` overwrites it |
