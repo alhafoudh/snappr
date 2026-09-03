@@ -33,26 +33,21 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::problem::{detail, name_of, Problem};
+use crate::problem::{detail, name_of, Payload, Problem};
 use crate::settings::{Orientation, Overlay, Settings};
 use crate::AppState;
 
 /// Where the photo goes inside an overlay, as fractions of the frame in 0..1.
+///
 /// Fractions rather than pixels because the card is drawn at whatever size the
-/// panel is, and because that is the shape `Snappr::OverlaySvg` reports.
-#[derive(Debug, Clone, Copy, Serialize)]
-pub struct Window {
-    pub x: f64,
-    pub y: f64,
-    pub width: f64,
-    pub height: f64,
-}
+/// panel is - and re-exported rather than redeclared, because it is the pipeline
+/// that measures it.
+pub use snappr_core::overlay_svg::Window;
 
-/// What Ruby made of one overlay file. Cached against the key, so switching an
-/// overlay on and off does not re-render it.
+/// What the pipeline made of one overlay file. Cached against the key, so
+/// switching an overlay on and off does not re-render it.
 #[derive(Debug, Clone)]
 pub struct Render {
     thumb: PathBuf,
@@ -70,7 +65,8 @@ pub struct Render {
 /// derives by comparing `Overlay` values: the comparison is structural, it would
 /// be the second place the rule lived, and the card is the only thing that needs
 /// the answer.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[ts(export, optional_fields)]
 pub struct OverlayCard {
     /// The identity, and what goes back on `set_overlay` when a toggle is clicked.
     pub overlay: Overlay,
@@ -103,7 +99,7 @@ pub struct OverlayCard {
 /// The PNGs' home. Snappr's own directory, and the second entry in
 /// `assetProtocol.scope` - the directory and the scope are a single decision, so
 /// moving one silently stops the panel drawing anything.
-pub fn dir(app: &AppHandle) -> Result<PathBuf, String> {
+pub fn dir(app: &AppHandle) -> Result<PathBuf, Payload> {
     let dir = app
         .path()
         .app_data_dir()
@@ -185,7 +181,7 @@ pub fn cards(app: &AppHandle, settings: &Settings) -> Vec<OverlayCard> {
                 warnings: render.map(|render| render.warnings.clone()).unwrap_or_default(),
                 error: missing.then(|| {
                     let path = path.clone().unwrap_or_default();
-                    Problem::OverlayFileGone { file: name_of(&path), path: &path }.ui()
+                    Problem::OverlayFileGone { file: name_of(&path), path: path.clone() }.ui()
                 }),
                 missing,
                 overlay: overlay.clone(),
@@ -230,21 +226,38 @@ pub fn refresh(app: AppHandle) {
             if state.overlays.lock().unwrap().contains_key(key) {
                 continue;
             }
-            let Some(sidecar) = state.sidecar.lock().unwrap().clone() else {
-                // Not up yet. The boot thread calls this again once it is, so
-                // there is nothing to retry and nothing to say.
+            let Some(worker) = state.worker.lock().unwrap().clone() else {
+                // libvips is not usable, which the Stage is already saying. A
+                // card without a picture is the least of the operator's problems.
                 return;
             };
 
-            match sidecar.overlay_preview(&path.display().to_string(), &dir.display().to_string(), key) {
-                Ok(frame) => {
-                    state.overlays.lock().unwrap().insert(key.clone(), render_from(&frame));
+            // Queued on the same worker as the composites, so a card asked for
+            // while a 12MP HEIC is being composited waits its turn rather than
+            // competing for memory with it.
+            let config = settings.pipeline_config(&app);
+            let (path, dir, key_owned) = (path.clone(), dir.clone(), key.clone());
+            let drawn = worker
+                .submit(move || {
+                    snappr_core::overlay_preview::render(&config, &path, &dir, &key_owned)
+                })
+                .recv();
+
+            match drawn {
+                Ok(Ok(card)) => {
+                    state.overlays.lock().unwrap().insert(key.clone(), Render::from(card));
                     announce(&app);
                 }
                 // The overlay still works - it is only its picture that is
                 // missing - so this is a log line and a card without a thumbnail,
                 // not something to interrupt the operator with.
-                Err(e) => log::warn!("cannot draw {}: {e}", overlay.label()),
+                Ok(Err(problem)) => {
+                    log::warn!("cannot draw {}: {}", overlay.label(), problem.log_line())
+                }
+                Err(_) => {
+                    log::warn!("cannot draw {}: the worker stopped", overlay.label());
+                    return;
+                }
             }
         }
 
@@ -253,30 +266,23 @@ pub fn refresh(app: AppHandle) {
     });
 }
 
-fn render_from(frame: &Value) -> Render {
-    Render {
-        thumb: PathBuf::from(frame["thumb"].as_str().unwrap_or_default()),
-        // The rendered pixels are the authority, not the reported ratio: they are
-        // what the card is drawing, and a divide-by-zero here would take the card
-        // out rather than the overlay.
-        aspect: match (frame["width"].as_f64(), frame["height"].as_f64()) {
-            (Some(width), Some(height)) if height > 0.0 => width / height,
-            _ => 1.0,
-        },
-        window: frame["window"].as_object().map(|window| {
-            let at = |key: &str| window.get(key).and_then(Value::as_f64).unwrap_or(0.0);
-            Window { x: at("x"), y: at("y"), width: at("width"), height: at("height") }
-        }),
-        // Only the operator's half crosses. The class and the code were logged on
-        // the Ruby side; see the frame documentation in lib/snappr/server.rb.
-        warnings: frame["warnings"]
-            .as_array()
-            .map(|list| {
-                list.iter()
-                    .filter_map(|warning| warning["message"].as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default(),
+impl From<snappr_core::overlay_preview::Card> for Render {
+    fn from(card: snappr_core::overlay_preview::Card) -> Self {
+        Self {
+            thumb: card.thumb,
+            // **The rendered pixels are the authority, not the reported ratio**:
+            // they are what the card is actually drawing, and a zero height here
+            // would take the card out rather than the overlay.
+            aspect: if card.height > 0 {
+                card.width as f64 / card.height as f64
+            } else {
+                1.0
+            },
+            window: card.window,
+            // Only the operator's half crosses. The code was logged where the
+            // warning was raised.
+            warnings: card.warnings.into_iter().map(|warning| warning.message).collect(),
+        }
     }
 }
 

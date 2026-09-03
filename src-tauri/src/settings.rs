@@ -1,50 +1,47 @@
-//! Operator settings, and the slice of them the Ruby side is told about.
+//! Operator settings: what the window shows and what the pipeline is handed.
 //!
 //! Plain serde into `app_config_dir()` rather than tauri-plugin-store: the Rust
 //! shell owns settings, the fs plugin's Rust side offers only scope methods anyway,
 //! and this way the file is human-readable JSON with no IPC round-trip and no
 //! capability to grant.
+//!
+//! **The numbers here are not a second defaults table.** Everything the pipeline
+//! reads defaults to `PipelineConfig::default()` and is handed back as one, so
+//! there is no handshake in the middle and nothing to keep in step. What is left
+//! in this file is genuinely the shell's: the watch toggle, the overlay library,
+//! the panel's collapsed state, the printer and its paper name.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
+pub use snappr_core::config::Orientation;
+use snappr_core::config::PipelineConfig;
 use tauri::path::BaseDirectory;
 use tauri::{AppHandle, Manager};
 
-use crate::problem::{detail, Problem};
+use crate::problem::{detail, Payload, Problem};
 
 /// What the one overlay snappr ships is called wherever it is named. A constant
 /// because the panel, the log and the settings file all have to agree - the
 /// operator has to recognise the card as the thing Reveal in Finder hands them.
 pub const SAMPLE_NAME: &str = "Sample overlay";
 
-/// The two overlay slots, which are also the two crop shapes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Orientation {
-    Landscape,
-    Portrait,
-}
-
-impl Orientation {
-    pub const ALL: [Self; 2] = [Self::Landscape, Self::Portrait];
-}
-
-impl Orientation {
-    /// The sample snappr ships for this slot, relative to the resource directory,
-    /// or `None` when it ships none.
-    ///
-    /// Only landscape has one, deliberately. One sample is enough to show what an
-    /// overlay is and where the `#FF00FF` window goes, and a second drawn to a
-    /// different design would suggest the two slots are a matched pair that has to
-    /// be kept in step.
-    fn sample(self) -> Option<&'static str> {
-        match self {
-            Self::Landscape => Some("sample/overlay-landscape.svg"),
-            Self::Portrait => Option::None,
-        }
+/// The sample snappr ships for an orientation, relative to the resource
+/// directory, or `None` when it ships none.
+///
+/// Only landscape has one, deliberately. One sample is enough to show what an
+/// overlay is and where the `#FF00FF` window goes, and a second drawn to a
+/// different design would suggest the two slots are a matched pair that has to be
+/// kept in step.
+///
+/// A free function rather than a method because `Orientation` belongs to
+/// `snappr-core` now, and where a *bundle* keeps its resources is not something
+/// the pipeline can be told about - see `Overlay::resolve`.
+fn sample_for(orientation: Orientation) -> Option<&'static str> {
+    match orientation {
+        Orientation::Landscape => Some("sample/overlay-landscape.svg"),
+        Orientation::Portrait => None,
     }
 }
 
@@ -66,8 +63,9 @@ impl Orientation {
 /// `{"kind":"custom","path":"/..."}`. Not `untagged`: that turns every parse error
 /// into "data did not match any variant", which is the one message you cannot act
 /// on from a log line.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(tag = "kind", content = "path", rename_all = "lowercase")]
+#[ts(export)]
 pub enum Overlay {
     Sample,
     None,
@@ -164,7 +162,7 @@ impl Overlay {
             Self::Custom(path) => Some(path.clone()),
             // `resolve` only joins and normalises, so the file has to be checked
             // for separately.
-            Self::Sample => orientation.sample().and_then(|name| {
+            Self::Sample => sample_for(orientation).and_then(|name| {
                 app.path()
                     .resolve(name, BaseDirectory::Resource)
                     .ok()
@@ -174,60 +172,14 @@ impl Overlay {
     }
 }
 
-fn default_watch_dir() -> PathBuf {
-    dirs_home().join("Downloads")
-}
+// The twelve `default_*` functions that used to sit here are gone: every one of
+// them restated a value that `PipelineConfig::default()` already holds, and
+// `Settings::default` now derives from that instead. `#[serde(default)]` on the
+// struct is what fills an absent key, and it calls `Settings::default`.
 
-fn dirs_home() -> PathBuf {
-    std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"))
-}
-
-fn default_extensions() -> Vec<String> {
-    ["heic", "heif", "jpg", "jpeg"].map(String::from).to_vec()
-}
-
-fn default_output_suffix() -> String {
-    ".overlay.png".into()
-}
-
-fn default_background() -> String {
-    "#ffffff".into()
-}
-
-fn default_png_compression() -> u8 {
-    6
-}
-
-fn default_short_mm() -> f64 {
-    100.0
-}
-
-fn default_long_mm() -> f64 {
-    148.0
-}
-
-fn default_preview_max_px() -> u32 {
-    2000
-}
-
-fn default_preview_thumb_px() -> u32 {
-    400
-}
-
-fn default_preview_quality() -> u8 {
-    80
-}
-
-fn default_stability_checks() -> u32 {
-    2
-}
-
-fn default_stability_timeout_secs() -> u64 {
-    30
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(default)]
+#[ts(export)]
 pub struct Settings {
     pub watch_dir: PathBuf,
     /// The bar's watch toggle. Persisted so a kiosk comes back the way it was
@@ -270,16 +222,17 @@ pub struct Settings {
     pub overlays_collapsed: bool,
     pub extensions: Vec<String>,
     /// Dual-purpose: it names the output file *and* is the watcher's self-output
-    /// guard, so it has to match what the Ruby side appends.
+    /// guard. Both readers are now the same code, so they cannot disagree.
     pub output_suffix: String,
     pub background: String,
-    pub png_compression: u8,
+    pub png_compression: i32,
     pub print_short_mm: f64,
     pub print_long_mm: f64,
-    pub preview_max_px: u32,
-    pub preview_thumb_px: u32,
-    pub preview_quality: u8,
+    pub preview_max_px: i32,
+    pub preview_thumb_px: i32,
+    pub preview_quality: i32,
     pub stability_checks: u32,
+    #[ts(type = "number")]
     pub stability_timeout_secs: u64,
     /// Empty means the system default printer.
     pub printer: String,
@@ -292,25 +245,29 @@ pub struct Settings {
 }
 
 impl Default for Settings {
+    /// **Every pipeline value comes from `PipelineConfig::default()`**, which is
+    /// the single defaults table. Only the settings that are genuinely the
+    /// shell's - the toggle, the library, the printer - are written here.
     fn default() -> Self {
+        let pipeline = PipelineConfig::default();
         Self {
-            watch_dir: default_watch_dir(),
+            watch_dir: pipeline.watch_dir,
             watch_enabled: true,
             overlay_landscape: Overlay::Sample,
             overlay_portrait: Overlay::None,
             overlays: vec![Overlay::Sample],
             overlays_collapsed: false,
-            extensions: default_extensions(),
-            output_suffix: default_output_suffix(),
-            background: default_background(),
-            png_compression: default_png_compression(),
-            print_short_mm: default_short_mm(),
-            print_long_mm: default_long_mm(),
-            preview_max_px: default_preview_max_px(),
-            preview_thumb_px: default_preview_thumb_px(),
-            preview_quality: default_preview_quality(),
-            stability_checks: default_stability_checks(),
-            stability_timeout_secs: default_stability_timeout_secs(),
+            extensions: pipeline.extensions,
+            output_suffix: pipeline.output_suffix,
+            background: pipeline.background,
+            png_compression: pipeline.png_compression,
+            print_short_mm: pipeline.print_short_mm,
+            print_long_mm: pipeline.print_long_mm,
+            preview_max_px: pipeline.preview_max_px,
+            preview_thumb_px: pipeline.preview_thumb_px,
+            preview_quality: pipeline.preview_quality,
+            stability_checks: pipeline.stability_checks,
+            stability_timeout_secs: pipeline.stability_timeout_secs,
             printer: String::new(),
             print_paper_name: "Postcard.Fullbleed".into(),
         }
@@ -318,10 +275,6 @@ impl Default for Settings {
 }
 
 impl Settings {
-    pub fn stability_timeout(&self) -> Duration {
-        Duration::from_secs(self.stability_timeout_secs)
-    }
-
     /// The slot for an orientation, so callers stop writing the same two-armed
     /// match every time they need one.
     pub fn slot(&self, orientation: Orientation) -> &Overlay {
@@ -404,7 +357,7 @@ impl Settings {
         self.overlays = library;
     }
 
-    pub fn path(app: &AppHandle) -> Result<PathBuf, String> {
+    pub fn path(app: &AppHandle) -> Result<PathBuf, Payload> {
         let dir = app
             .path()
             .app_config_dir()
@@ -445,13 +398,13 @@ impl Settings {
                     Ok(()) => format!("{e}; moved aside to {}", kept.display()),
                     Err(rename) => format!("{e}; could not move it aside either: {rename}"),
                 };
-                let said = Problem::SettingsUnreadable { path: &path, detail: note }.warn();
-                (Self::default(), Some(said))
+                let said = Problem::SettingsUnreadable { path: path.clone(), detail: note }.warn();
+                (Self::default(), Some(said.message))
             }
         }
     }
 
-    pub fn save(&self, app: &AppHandle) -> Result<(), String> {
+    pub fn save(&self, app: &AppHandle) -> Result<(), Payload> {
         let path = Self::path(app)?;
         let raw = serde_json::to_string_pretty(self)
             .map_err(|e| Problem::CannotSaveSettings { detail: detail(e) }.say())?;
@@ -459,36 +412,35 @@ impl Settings {
             .map_err(|e| Problem::CannotSaveSettings { detail: format!("{}: {e}", path.display()) }.say())
     }
 
-    /// The keys the pipeline actually reads. Deliberately not the whole struct:
-    /// the watch settings belong to this side now, and sending them would only
-    /// create a second place for them to drift.
+    /// What the pipeline is handed.
     ///
-    /// **`Overlay` never reaches Ruby - only a path or an explicit null does.**
-    /// That is what keeps the sample entirely a shell concept: `lib/snappr` sees
-    /// exactly what it always saw. It could not do the lookup itself either, since
-    /// `SNAPPR_ROOT` is `Resources/snappr` in a bundle and the repo root in
-    /// development, and the sample sits *beside* the first but *inside* the second.
+    /// **`Overlay` never reaches the pipeline - only a path or nothing does.**
+    /// That is what keeps the shipped sample entirely a shell concept:
+    /// `snappr-core` sees a path, exactly as it did when it was Ruby on the far
+    /// end of a pipe. It could not do the lookup itself either, since a bundle
+    /// keeps `sample/` beside its `Resources` and the repo keeps it inside the
+    /// source tree, and only the shell knows which layout it is in.
     ///
-    /// A slot that resolves to nothing travels as an explicit `null` rather than an
-    /// absent key. `Server#hello` merges this over `Config::DEFAULTS`, so an absent
-    /// key takes Ruby's default - which is nil today, making the two identical, but
-    /// this is the side that decides overlays and it should say so outright.
-    pub fn pipeline_config(&self, app: &AppHandle) -> Value {
-        json!({
-            "print": { "short_mm": self.print_short_mm, "long_mm": self.print_long_mm },
-            "overlay_svg": {
-                "landscape": self.overlay_landscape.resolve(app, Orientation::Landscape),
-                "portrait": self.overlay_portrait.resolve(app, Orientation::Portrait),
-            },
-            "output_suffix": self.output_suffix,
-            "background": self.background,
-            "png_compression": self.png_compression,
-            "preview": {
-                "max_px": self.preview_max_px,
-                "thumb_px": self.preview_thumb_px,
-                "quality": self.preview_quality,
-            },
-        })
+    /// `open_after` is false: the app draws the print in its own window, and
+    /// handing it to `open(1)` as well would put Preview in front of the kiosk.
+    pub fn pipeline_config(&self, app: &AppHandle) -> PipelineConfig {
+        PipelineConfig {
+            watch_dir: self.watch_dir.clone(),
+            extensions: self.extensions.clone(),
+            output_suffix: self.output_suffix.clone(),
+            background: self.background.clone(),
+            png_compression: self.png_compression,
+            print_short_mm: self.print_short_mm,
+            print_long_mm: self.print_long_mm,
+            preview_max_px: self.preview_max_px,
+            preview_thumb_px: self.preview_thumb_px,
+            preview_quality: self.preview_quality,
+            stability_checks: self.stability_checks,
+            stability_timeout_secs: self.stability_timeout_secs,
+            open_after: false,
+            overlay_landscape: self.overlay_landscape.resolve(app, Orientation::Landscape),
+            overlay_portrait: self.overlay_portrait.resolve(app, Orientation::Portrait),
+        }
     }
 }
 

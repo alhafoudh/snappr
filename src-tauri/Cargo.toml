@@ -37,10 +37,11 @@ tauri-plugin-log = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-window-state = "2"
 
-notify = "8"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-log = "0.4"
+snappr-core = { path = "../crates/snappr-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+ts-rs = { workspace = true }
 
 # The share sheet and the print dialog. Neither has first-party Tauri support
 # (tauri#8063 is still open for share; Webview::print() exists but rasterises the
@@ -54,8 +55,5 @@ objc2-app-kit = { version = "0.3", features = [
   "NSPrintInfo", "NSPrintOperation", "NSPrintPanel", "NSSharingService", "NSGraphics",
 ] }
 
-[profile.release]
-codegen-units = 1
-lto = true
-opt-level = "s"
-strip = true
+# [profile.release] lives in the workspace root now - cargo ignores profiles on a
+# non-root member and says so on every build.

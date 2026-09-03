@@ -1,0 +1,12 @@
+[package]
+name = "xtask"
+description = "snappr's build tasks: libvips, its dylib closure, and the bundle gate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+serde_json.workspace = true
+sha2.workspace = true

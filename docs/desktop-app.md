@@ -1,105 +1,100 @@
 # The desktop app
 
-The Tauri app: `src-tauri/` is the Rust shell, `src/` the React frontend, and a
-Ruby child process does the image work. `CLAUDE.md` owns the pipeline and the
+The Tauri app: `src-tauri/` is the shell, `src/` the React frontend, and
+`snappr-core` does the image work. `CLAUDE.md` owns the pipeline and the
 image-quality invariants; this file owns everything around it.
 
 **Read the source for the reasoning.** Nearly every decision here is already
 argued at the place it lives, with the bug it prevents and the measurement
-attached - `sidecar.rs`, `runtime.rs`, `watcher.rs`, `settings.rs`, `photo.rs`,
-`mac.rs`, `server.rb`, `preview.rb`, `usePhotos.ts` and `App.tsx` all carry their
-own comments. This document deliberately does not restate them. What it records is
-the material that spans files and therefore sits in no file's comments, plus the
-map of which file to open.
+attached - `lib.rs`, `settings.rs`, `photo.rs`, `overlays.rs`, `mac.rs`, and
+core's `watcher.rs`, `worker.rs` and `preview.rs` all carry their own comments, as
+do `usePhotos.ts`, `ipc.ts` and `App.tsx`. This document deliberately does not
+restate them. What it records is the material that spans files and therefore sits
+in no file's comments, plus the map of which file to open.
 
 ## The division of labour
 
 `lib.rs` states it at the top and it is the line to hold:
 
-> Rust owns the window, the settings, the drop-folder watch and its debounce, the
-> persisted index, the sidecar's lifetime, and printing and sharing. **Ruby owns
-> exactly the image pipeline**: one photo in, an overlay PNG and three previews
-> out. Nothing about image processing lives on this side.
+> This side owns the window, the settings, the persisted index, printing and
+> sharing, and the drops. **`snappr-core` owns the pipeline and the watch**: one
+> photo in, an overlay PNG and three previews out. Nothing about image processing
+> lives on this side.
 
-The corollary is that `lib/snappr` needed no changes at all to gain an app. The
-CLI and the app drive the same `Overlay`, and anything that would make Ruby aware
-of the shell is going the wrong way.
+The corollary is that `snappr-core` knows nothing about the shell. The CLI and the
+app drive the same `Overlay`, and anything that would make the pipeline aware of a
+window is going the wrong way.
 
-## The sidecar
+**There was a process boundary here until 2026-09-03**, and the shape of this file
+still shows where it was. The pipeline was a Ruby child on the far end of an
+NDJSON pipe; `sidecar.rs` and `runtime.rs` are gone, along with the frame grammar,
+the reader and stderr-pump threads, the 120-second request timeout, the `pending`
+queue for drops that arrived before the child was up, and the seven `Pipeline*`
+problems that described a child in one state or another.
 
-The Ruby child is `bin/snappr serve`, spawned by `Sidecar::start`. `serve` is also
-the **default subcommand**, because inside `Snappr.app` the binary is invoked bare
-with no arguments - see `cli.rb`. Changing that default breaks the packaged app.
+## The worker
 
-**Newline-delimited JSON on stdin and stdout, one request at a time.** The frame
-grammar is documented in full at the top of `lib/snappr/server.rb`; there are five
-requests (`hello`, `overlay`, `overlay_preview`, `configure`, `ping`) and three
-reply shapes, distinguished by which key is present rather than by a `type` field:
+Image work goes through `core::worker`: **one thread, one queue.** Callers submit
+a closure and wait on a channel for their own result.
 
-| shape | key | meaning |
-|---|---|---|
-| progress | `event` | logged, not awaited - a slow photo can still say it started |
-| success | `ok: true` | completes the request |
-| failure | `ok: false` + `error` | completes the request |
+**That queue used to be free, and losing it would have been a silent regression.**
+The Ruby child accepted one request at a time, so the shell could spawn an
+unbounded thread per photo and they all queued on the pipe - `server.rb` called
+that the deduplication mechanism. Delete the child without replacing the queue and
+a busy AirDrop session composites four 12MP frames at once, each holding a 10-25 MB
+output plus its source; memory is what gives out first, on the machine least able
+to afford it. `jobs_never_run_concurrently` in `worker.rs` is the assertion that
+keeps it.
 
-Everything correlates by `id`. Three invariants make this work, and each has a
-failure mode that looks like something else:
+Two things about the shape:
 
-- **Stdout is protocol; stderr is log.** One stray `puts` desynchronises the
-  caller's parser, and the symptom is a hang rather than a parse error.
-  `Snappr.logger` writes to `$stderr` for exactly this reason.
-- **Strictly sequential, and that is the deduplication mechanism.** The same photo
-  cannot be in flight twice because it cannot be sent twice. `server.rb` notes
-  that this is why it needs none of the in-flight `Set` and mutex that `Watcher`
-  keeps for a path listen announces as added more than once. Adding concurrency
-  here moves that responsibility with no replacement.
-- **Each frame is flushed.** `stdin.flush()` on the Rust side, `@output.sync =
-  true` on the Ruby side. Both halves are needed or the handshake deadlocks.
+- **The queue knows nothing about what the work is.** It takes closures, so a
+  composite, a preview and an overlay card all go through one lane without the
+  module learning about any of them.
+- **The config is read when a photo is *queued*, not inside the job.** So a photo
+  composites with the overlays that were live when it arrived, rather than
+  whatever the operator switched to while it waited. That is also why
+  `set_overlay` only saves: there is no second copy of the settings to push to,
+  which is what `configure` existed for.
 
-Three threads: a reader owning stdout, a pump forwarding the child's stderr into
-the app's log, and caller threads that block on `request`. The UI is driven by
-events, so nothing waits on the main thread.
+Threads, now: the event thread (Tauri's, where every command body and every drop
+runs), one `process` thread per photo, the watcher's poll thread, one boot thread,
+one `overlays::refresh` thread, and the worker. The three sidecar-adjacent threads
+are gone. **No command does image work on the event thread** - the commands are
+synchronous `#[tauri::command]`s, which Tauri runs on the main thread, and they
+are safe only because they all delegate.
 
-**Config travels in the handshake**, so there is one source of truth. The child
-never reads `config/snappr.yml` - the app does not call `Config.load` at all.
-`Settings::pipeline_config` decides what crosses, and the key list is mirrored by
-`Server::CONFIG_KEYS`; the two have to agree.
+**Startup is no longer a wait.** `RuntimeStatus.ready` used to become true about a
+second after launch, once a Ruby interpreter had started and answered a handshake;
+it is now one `Vips::init` and the only way it fails is a broken install. The
+`pending` queue that held drops arriving during that second - with its own lock
+discipline against the boot thread - is gone, because the window it protected no
+longer exists.
 
-**`configure` is the same handler as `hello`.** That is how a settings change
-reaches a running child without a relaunch, and it needs no locking of its own:
-the child handles one frame at a time, so a reconfigure simply queues behind any
-photo in flight. `set_overlay` and `remove_overlay` are the commands that use it.
-
-**`overlay_preview` is the odd one out: it is about an overlay, not a photo.** It
-renders one SVG at ~440px into a directory the caller names and reports where the
-`#FF00FF` window landed, and it is what the overlay panel's cards draw. Two things
-about it are deliberate:
-
-- **A missing window comes back as `ok: true` with a null `window` and a warning**,
-  not as a failure. The artwork is still worth drawing, and a card that shows the
-  design and says the photo area was not found tells the operator far more than an
-  empty cell. That case *is* the reason the card exists - see "The overlay panel".
-- **`dir` and `key` are `fetch`ed with no default**, the same rule
-  `lib/snappr/preview.rb` follows. Ruby has no index and cannot tell a stale
-  rendering from a current one, so the naming and the collecting are this side's
-  job, exactly as with the preview JPEGs.
-
-**Nothing supervises the child.** This is the gap worth knowing about before
-trusting the app in front of a queue of guests. If Ruby dies, the reader thread
-hits EOF and exits without draining the pending map, so a waiting caller blocks
-the full 120s `REQUEST_TIMEOUT` before failing; `AppState.sidecar` stays `Some`
-and `RuntimeStatus.ready` stays `true`. The recovery story is one message that
-says to restart snappr. Anyone adding auto-restart has to also clear `pending` and
-re-send `configure`.
+**If the worker thread dies, every later photo fails with
+`ImageToolsUnavailable`** and the recovery story is the same as it was: one message
+saying to restart snappr. That is better than it was - a dead Ruby child left
+`ready` claiming `true` and blocked each caller for the full 120-second timeout -
+but it is still not supervision.
 
 ## Invariants that span the whole app
 
-**Events are not replayed, so every channel is pull-then-subscribe.** The sidecar
-becomes ready about a second after launch, comfortably before the webview has
-attached its listeners, so a UI that only subscribed would wait forever for a
-message already sent. Hence `RuntimeStatus` is *stored as well as emitted*
-(`lib.rs`), and `usePhotos` subscribes **before** it reads, awaiting the
-subscriptions because `listen()` resolves on a microtask.
+**Events are not replayed, so every channel is pull-then-subscribe.** The pipeline
+is ready within a millisecond of launch, long before the webview has attached its
+listeners, so a UI that only subscribed would wait forever for a message already
+sent. Hence `RuntimeStatus` is *stored as well as emitted* (`lib.rs`), and
+`usePhotos` subscribes **before** it reads, awaiting the subscriptions because
+`listen()` resolves on a microtask. The margin used to be a second and is now
+vanishing, which makes this *more* necessary rather than less.
+
+**Nothing on the wire is written twice.** `src/bindings/` is generated from the
+Rust structs by `cargo test`, and `src/ipc.ts` is the only file that names a
+command or an event. `src/types.ts` used to hand-mirror nineteen `Settings`
+fields, `Photo`, `Exif` and `OverlayCard` against structs nothing checked it
+against, and three had already drifted: `Photo.orientation` was narrowed in
+TypeScript to a union Rust did not guarantee, `mac::Anchor` had no type at all,
+and a `Settings` field added in Rust was invisible. Adding a field is now a
+compile error until the frontend is regenerated.
 
 **Rust is the sole owner of what the filmstrip contains.** The frontend never adds
 or removes a photo on its own. Even clearing goes out as a command and comes back
@@ -126,9 +121,8 @@ tidy-up - silently inverts those fallbacks.
 
 ## The preview tier
 
-`lib/snappr/preview.rb` writes three JPEGs per photo: a filmstrip thumb, a preview
-of the composite, and a preview of the untouched source for the before/after
-toggle.
+`core::preview` writes three JPEGs per photo: a filmstrip thumb, a preview of the
+composite, and a preview of the untouched source for the before/after toggle.
 
 - **They exist because the webview cannot be shown the real output.** Tauri's
   asset protocol reads a whole file into memory per request, and the prints are
@@ -148,66 +142,59 @@ toggle.
   cache while the PNG on disk was correct. The key is SHA256 over path and
   nanosecond mtime of both files.
 - **Superseded sets are deleted by the shell**, in `discard_superseded`, because
-  Ruby has no index and cannot tell an old preview of this photo from a current
-  preview of another. It runs *after* `publish`, so a crash in between leaks three
-  JPEGs rather than blanking a live cell.
+  the pipeline has no index and cannot tell an old preview of this photo from a
+  current preview of another. It runs *after* `publish`, so a crash in between
+  leaks three JPEGs rather than blanking a live cell.
 
 Where they go and why it is not free: see "Previews never go in the drop folder"
 in `CLAUDE.md`.
 
-## Finding the runtime
+## Finding libvips
 
-`Runtime::detect` chooses between a development layout and a bundle layout.
-
-**It probes with `is_dir`, never `exists`, and that one word is the whole guard.**
-Under `tauri dev` the resource directory is `target/debug`, which already contains
-a *file* called `snappr` - the binary. `exists` would send every dev run down the
-bundle branch, and the resulting failure reads as a broken Ruby runtime rather
-than as a path bug.
-
-**The bundle layout has never run.** `bundle.resources` names `sample/` and
-nothing else, so `Resources/snappr` never exists and `in_bundle` is unreached. The
-table in `runtime.rs` marks each line PLANNED or WIRED; do not plan against it as
-though it were live. The shape it plans for is set by codesigning - see
+`core::vips::init` is the whole of it now, and there is no layout to detect: the
+binary links libvips and dyld resolves it through the two `LC_RPATH` entries
+`src-tauri/build.rs` bakes in - `Contents/Frameworks` in a bundle, `build/vips` in
+development. Which libvips gets *linked* is a per-profile decision, in
 `docs/bundled-runtime.md`.
 
-The child's environment is short and every entry is load-bearing:
+There used to be a `Runtime::detect` here that chose between a development layout
+and a bundle layout, spawned a child with four environment variables, and probed
+with `is_dir` rather than `exists` because `target/debug` already contained a file
+called `snappr`. Its bundle branch never once executed. What survives from it:
 
-- **`LD_LIBRARY_PATH`, not `DYLD_LIBRARY_PATH`.** FFI reads it from Ruby's `ENV`
-  and joins the paths itself, so it works despite meaning nothing to dyld on
-  macOS - and unlike `DYLD_*` it survives hardened runtime, which is on. Without
-  it FFI falls through to its hardcoded `/opt/homebrew/lib`, which works on a
-  developer machine and fails everywhere else.
-- **`LIBHEIF_PLUGIN_PATH` points at a directory that deliberately does not
-  exist.** libheif opportunistically dlopens everything in its plugin directory,
-  dragging in a second libheif plus ffmpeg, opus, vpx and x264. libde265 is linked
-  in, so decoding needs none of it; point the scan somewhere empty and it finds
-  nothing.
+- **`LIBHEIF_PLUGIN_PATH` still points at a directory that deliberately does not
+  exist**, set before `Vips::init` rather than passed to a child. libheif
+  opportunistically dlopens everything in its plugin directory, dragging in a
+  second libheif plus ffmpeg, opus, vpx and x264. libde265 is linked in, so
+  decoding needs none of it; point the scan somewhere empty and it finds nothing.
+- **`LD_LIBRARY_PATH` is gone and should not come back.** It only ever worked
+  because Ruby's FFI read that variable itself and joined the paths by hand;
+  `DYLD_*` means nothing here, hardened runtime strips it, and `LC_RPATH` is the
+  mechanism that does not need an exemption in `entitlements.plist`.
 
-Argv is `--disable-gems -r <bundler/setup> <entrypoint> serve`. `--disable-gems`
-is correct and faster: the standalone bundle puts the gems on `$LOAD_PATH` itself.
+## The watcher
 
-## Two watchers
+`crates/snappr-core/src/watcher.rs`, used by the app and by `mise run watch`.
+There were two - the app's, and a `listen`-based one in Ruby for the CLI - because
+the CLI predated the app. One is the point of the rewrite; the CLI inherited the
+better implementation in the process, gaining `already_there`, `Presence` and
+stall recovery.
 
-`src-tauri/src/watcher.rs` is what the app uses. `lib/snappr/watcher.rb` is the
-headless CLI path (`mise run watch`) and uses the `listen` gem. Both exist because
-the CLI predates the app and is still the iteration loop.
-
-The Rust one carries four behaviours over from the Ruby one rather than
-reinventing them, each easy to get wrong in a way that only shows at an event:
+Four behaviours, each easy to get wrong in a way that only shows at an event:
 **non-recursive** (the 63-seconds-of-pinned-core fix), **arrivals only**, **filter
 before touching the disk**, and **debounce on size and mtime** because AirDrop
 writes non-atomically and a file that exists is not a file that is finished. The
 first two are argued in full in `CLAUDE.md` under Hard constraints.
 
-The second is the one to read before touching this file. `listen` gives the Ruby
-side "added" for free by diffing directory snapshots; there is no equivalent here,
-and **event kinds cannot substitute for it** - FSEvents accumulates flags per path,
-so `Create(File)` is reported for a chmod, an append and a deletion alike, even on
-a file that predates the watch. So `watcher.rs` ignores kinds and keeps the state
-instead: `already_there` for what was in the folder when the watch began, and
-`admit` for the rule. The live tests in that file, `#[ignore]`d and run with
-`cargo test -- --ignored`, exist because this is not catchable any other way.
+The second is the one to read before touching this file. **Event kinds cannot
+substitute for it** - FSEvents accumulates flags per path, so `Create(File)` is
+reported for a chmod, an append and a deletion alike, even on a file that predates
+the watch. So `watcher.rs` ignores kinds and keeps the state instead:
+`already_there` for what was in the folder when the watch began, and `admit` for
+the rule. `listen` gave the Ruby side the same answer for free by diffing
+directory snapshots, which is why that half never had to solve this. The live
+tests in that file, `#[ignore]`d and run with `cargo test -- --ignored`, exist
+because this is not catchable any other way.
 
 `watcher::refusal` is the single implementation of the candidate rule and
 `is_candidate` delegates to it, so the filter and the explanation it gives the
@@ -363,10 +350,11 @@ the Dock has nothing to check a drop against however complete the embedded plist
 is. Test with `npm run tauri build -- --debug --bundles app` and the `.app` it
 produces.
 
-Because a Dock drop can precede the sidecar, `AppState` has a pending queue, and
-the lock discipline is explicit on both sides: `ingest_one` holds `pending` while
-it looks at `sidecar`, and the boot thread takes the same lock before installing
-the sidecar and draining, so a path can never fall between the two.
+A Dock drop can be what *launches* the app, and that used to need a pending queue
+with a lock discipline on both sides - `ingest_one` held `pending` while it looked
+at the sidecar, and the boot thread took the same lock before installing the child
+and draining, so a path could not fall between the two. Both are gone: the
+pipeline is up before the window is, so a drop is simply handled where it lands.
 
 ## The window
 
@@ -432,7 +420,7 @@ carries a comment saying why:
   `columns="repeat(n, 132px)"`). Those props are typed `"enum | string"` for
   exactly this.
 - `OverlayPanel.tsx` positions the photo-window placeholder with percentages from
-  the fractions Ruby reports, and sizes the card with `aspectRatio` from the
+  the fractions the pipeline reports, and sizes the card with `aspectRatio` from the
   overlay's own shape. Neither is a design choice: they are measurements of the
   file being drawn.
 - `writing-mode: vertical-rl` on the collapsed rail's label. A `transform:
@@ -535,16 +523,16 @@ drop; removing is on the card's context menu.
 
 **The picture on each card is a check, not a decoration.** The card paints the
 print's background, then a grey rectangle with a photo icon at exactly the window
-Ruby reported, then the render on top - which has that window punched out of it, so
-the placeholder shows through. An overlay whose `#FF00FF` marker did not survive
+the pipeline reported, then the render on top - which has that window punched out
+of it, so the placeholder shows through. An overlay whose `#FF00FF` marker did not survive
 its export puts the icon somewhere obviously wrong, or reports no window at all and
 says so. Before this, that failure was invisible until a print came out wrong.
 
 It only means anything because the render comes back **through librsvg, the same
 renderer the print uses**. Handing the SVG to the webview would show what WebKit
 makes of the file, magenta marker and all, and would prove nothing about what will
-be composited. That is the whole reason `overlay_preview` is a sidecar command
-rather than a `data:` URL.
+be composited. That is the whole reason the card goes through
+`core::overlay_preview` rather than being a `data:` URL.
 
 Four things that are decisions rather than taste:
 
@@ -598,7 +586,7 @@ obvious:
 - **The lens is dropped when it only restates the camera.** Apple writes
   `LensModel` as `"<camera> back camera 6.765mm f/1.78"` - the camera name, then
   the focal length and aperture the line already prints. The rule lives in
-  `Snappr::Exif`, not in the frontend, so the shell receives values it can print
+  `core::exif`, not in the frontend, so the shell receives values it can print
   unmodified. It keeps every interchangeable lens, which is where the lens is the
   interesting fact.
 - **The shutter time is shown only when it is more than `TAKEN_AT_DRIFT` from the
@@ -635,40 +623,44 @@ want Safari 16.2 / 15.4 WebKit, while `minimumSystemVersion` is 11.0. Big Sur ca
 run Safari 16.6, so a stock un-updated Big Sur degrades rather than breaks, and
 `panelBackground="solid"` avoids the translucent surfaces that suffer most.
 
-Run it with `npm run tauri dev` (Vite on a fixed port 5183), after
-`mise run runtime` has built the bundled Ruby and libvips into `build/`.
+Run it with `npm run tauri dev` (Vite on a fixed port 5183). A debug build links
+Homebrew's libvips if `mise run runtime` has never run, so it comes up on a fresh
+clone; `mise run app` is what builds the bundle with libvips inside it.
 
 ---
 
 ## What the app is allowed to say
 
-**Every message exists in exactly two versions, declared together.** The
-catalogues are `lib/snappr/problem.rb` (a `CATALOG` hash keyed by a stable code)
-and `src-tauri/src/problem.rs` (an enum, with one arm per problem in
-`Problem::parts`). Nothing writes a user-facing string anywhere else.
+**Every message exists in exactly two versions, declared together.** There is one
+catalogue, `crates/snappr-core/src/problem.rs` - an enum with one arm per problem
+in `Problem::parts`. Nothing writes a user-facing string anywhere else.
+`src-tauri/src/problem.rs` is a shim over it that adds the one thing core cannot
+do: delivering a message to the window, which needs an `AppHandle`.
 
 | half | goes to | may contain |
 |---|---|---|
 | `ui` | the window, and the first part of every log line | one or two plain sentences: what happened, then what to do |
 | `detail` | the console only | the exception class, the errno, the libvips text, full paths, ratios |
 
-`ui` may not contain a class name, a hex literal, a backticked shell command, or
-any of this repo's own vocabulary - "sidecar", "handshake", "viewBox", "keying
-out", "index", "pipeline". A path appears in `ui` only when the operator has to go
+`ui` may not contain a type name, a hex literal, a backticked shell command, or
+any of this repo's own vocabulary - "viewBox", "keying out", "index", "pipeline",
+"libvips". ("sidecar" and "handshake" were on that list too, and are now
+unsayable for a better reason: there is no child process to name.) A path appears in `ui` only when the operator has to go
 and look at it (the watched folder), never as decoration on a sentence that reads
-without it. `problem_test.rb` asserts all of this against the table, so reword
-freely - the tests assert on **codes**, not wording.
+without it. `tests/problem_rules.rs` asserts all of this against the whole table,
+so reword freely - the tests assert on **codes**, not wording.
 
 This exists because it was got wrong. The app used to show
-`Snappr::Error: no #FF00FF photo window found in brand.svg`: `sidecar.rs` built
-its display string as `format!("{}: {}", class, message)`, and the message itself
-had been written at the raise site for whoever wrote the code. **Do not put the
-class back in front of the message** - `error.class` and `error.code` travel on the
-wire so the shell can *log* them, and `Server`'s frame comment says so.
+`Snappr::Error: no #FF00FF photo window found in brand.svg`: the shell built its
+display string as `format!("{}: {}", class, message)`, and the message itself had
+been written at the raise site for whoever wrote the code. **Do not put a type name
+in front of a message.** The code travels beside it - every command returns
+`Result<T, Payload>`, which is `{ code, message }` - so the frontend can branch on
+the kind of failure without ever displaying the code.
 
-The split is enforced in four places - `server.rb`, `problem.rb`, `problem.rs` and
-`types.ts` - and `Problem::parts` being a single match is what stops a new variant
-being added with only one of its halves.
+`Problem::parts` being a single match is what stops a new variant being added with
+only one of its halves. That guarantee is why merging the two catalogues into one
+was safe.
 
 Anything snappr did not raise itself - `Vips::Error`, `KeyError`, a coercion
 failure - never shows its own text. `Problem.plain` substitutes the catalogue's
@@ -723,8 +715,7 @@ Each is argued at its own site; this is an index, not the argument.
 
 | change | breaks |
 |---|---|
-| prefixing `error.class` onto `error.message` (`sidecar.rs`) | the exact regression the two-version catalogue exists to prevent |
-| `exists` instead of `is_dir` in `Runtime::detect` | every dev run takes the never-executed bundle branch |
+| prefixing a type name onto a message | the exact regression the two-version catalogue exists to prevent |
 | any `stat` in `watcher::refusal` / `is_candidate` | undoes the pinned-core fix |
 | `RecursiveMode::Recursive` | the same, harder |
 | deriving `Deserialize` for `Overlay` (`settings.rs`) | a legacy `null` takes down the whole settings file |
@@ -735,7 +726,7 @@ Each is argued at its own site; this is an index, not the argument.
 | making `Photo::exif` non-`Option` | drops the whole session on the first launch after an update |
 | dropping `Stored::Legacy` | the same, for indexes already on disk |
 | `blocking_show` for the refusal alert | freezes the window - it runs on the event thread |
-| reading `sidecar` without holding `pending` in `ingest_one` | a Dock drop can fall between "not ready" and the drain |
+| doing image work in a command body | they are synchronous, so that is the event thread |
 | `Webview::print()` instead of `mac::print` | rasterises the photo through WKWebView |
 | setting the paper by size rather than PPD name | prints bordered on a SELPHY |
 | dropping the `PICKER` thread-local | the share popover is torn down as it appears |
@@ -745,10 +736,12 @@ Each is argued at its own site; this is an index, not the argument.
 | dropping `Settings::normalise` | an existing install opens with an empty panel and its own overlay nowhere in it |
 | keying overlay PNGs on the path alone | a re-exported design keeps showing the old artwork, out of WebKit's cache |
 | rendering the card's SVG in the webview | the card stops being a check - it would show WebKit's render, marker included |
-| making `overlay_preview` fail when no window is found | an unfixable-looking empty card instead of the artwork and the reason |
+| making the card render fail when no window is found | an unfixable-looking empty card instead of the artwork and the reason |
 | routing drops by pointer position rather than by extension | Dock drops have no position at all |
 | emitting `runtime` without storing it | a late listener waits forever |
 | routing boot's watch failure through `start_watching_noted` | emits the event twice |
 | moving `discard_superseded` before `publish` | a crash in between blanks a live cell |
 | sorting in `usePhotos` instead of `App.ordered` | inverts the newest-photo fallbacks |
-| adding concurrency to `Server` | removes the deduplication mechanism with no replacement |
+| more than one worker thread | four 12MP composites at once, each holding a 25 MB output |
+| hand-editing `src/bindings/` | it is generated; `cargo test` overwrites it |
+| naming a command or an event outside `src/ipc.ts` | the drift the generated bindings exist to end |

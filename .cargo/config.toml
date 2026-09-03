@@ -1,0 +1,17 @@
+# One output directory for the generated TypeScript, shared by both crates.
+#
+# `ts-rs` resolves a type's imports against the directory each type declares, so
+# two crates naming that directory by different relative paths - which they must,
+# sitting at different depths - generate `import ... from "../../../src/bindings/Exif"`
+# from inside `src/bindings/`. Setting the base here instead means every type
+# agrees on one directory and the imports come out as `./Exif`.
+#
+# `relative = true` makes the path relative to this file's parent, which is the
+# workspace root, so it does not matter which crate `cargo` was invoked from.
+[env]
+TS_RS_EXPORT_DIR = { value = "src/bindings", relative = true }
+
+# `cargo xtask <task>` instead of `cargo run -p xtask --`. The build tasks are
+# the only thing this repo needs an alias for.
+[alias]
+xtask = "run --package xtask --"

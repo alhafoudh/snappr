@@ -1,43 +1,51 @@
-//! snappr: the Tauri shell around the Ruby pipeline.
+//! snappr: the window, and everything that is not a pixel.
 //!
-//! Rust owns the window, the settings, the drop-folder watch and its debounce, the
-//! persisted index, the sidecar's lifetime, and printing and sharing. Ruby owns
-//! exactly the image pipeline: one photo in, an overlay PNG and three previews out.
-//! Nothing about image processing lives on this side.
+//! This side owns the window, the settings, the persisted index, printing and
+//! sharing, and the drops. `snappr-core` owns the pipeline and the watch: one
+//! photo in, an overlay PNG and three previews out.
+//!
+//! **There is no child process any more.** The pipeline used to be a Ruby
+//! interpreter on the far end of an NDJSON pipe, and the shape of this file still
+//! shows where that boundary was - work goes through
+//! [`snappr_core::worker::Worker`], which is one thread and one queue, because the
+//! child's one-request-at-a-time behaviour was the only thing stopping four 12MP
+//! composites from running at once.
 
 #[cfg(target_os = "macos")]
 mod mac;
 mod overlays;
 mod photo;
 mod problem;
-mod runtime;
 mod settings;
-mod sidecar;
-mod watcher;
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
+use snappr_core::overlay::Overlay as Pipeline;
+use snappr_core::watcher::{self, Arrival, Refusal};
+use snappr_core::worker::Worker;
 use tauri::{AppHandle, DragDropEvent, Emitter, Manager, State, WebviewWindow, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_window_state::StateFlags;
 
 use overlays::OverlayCard;
 use photo::{Index, Photo, Status};
-use problem::{detail, name_of, Problem};
-use runtime::Runtime;
+use problem::{detail, name_of, Payload, Problem};
 use settings::{Orientation, Overlay, Settings};
-use sidecar::Sidecar;
-use watcher::{Arrival, Refusal};
 
 /// Whether the pipeline is usable, and why not if it isn't.
 ///
-/// Held in state as well as emitted. Events are not replayed, and the sidecar is
-/// ready about a second after launch - comfortably before the webview has finished
-/// attaching its listeners - so a UI that only subscribed would wait forever for a
-/// message that had already been sent. The frontend pulls this on mount and
-/// subscribes for later changes; both paths read the same value.
-#[derive(Debug, Clone, Default, serde::Serialize)]
+/// Held in state as well as emitted. Events are not replayed and the pipeline is
+/// ready within a millisecond of launch - comfortably before the webview has
+/// finished attaching its listeners - so a UI that only subscribed would wait
+/// forever for a message that had already been sent. The frontend pulls this on
+/// mount and subscribes for later changes; both paths read the same value.
+///
+/// It used to take about a second, because a Ruby interpreter had to start and
+/// answer a handshake. Now the only thing that can go wrong is libvips failing to
+/// initialise, which means a broken install rather than a slow one.
+#[derive(Debug, Clone, Default, serde::Serialize, ts_rs::TS)]
+#[ts(export, optional_fields)]
 pub struct RuntimeStatus {
     ready: bool,
     /// The pipeline is unusable. **Only ever set when `ready` is false**, because
@@ -63,17 +71,22 @@ pub struct RuntimeStatus {
 pub struct AppState {
     settings: Mutex<Settings>,
     index: Mutex<Index>,
-    sidecar: Mutex<Option<Arc<Sidecar>>>,
     runtime: Mutex<RuntimeStatus>,
+    /// The pipeline's one worker thread. Every composite, preview and card render
+    /// goes through it, in the order they were asked for.
+    ///
+    /// `None` only if libvips could not be initialised, which is the one failure
+    /// [`RuntimeStatus::error`] reports. There is no window where the pipeline is
+    /// merely *not up yet*, which is why `pending` is gone: a drop on the Dock
+    /// icon at launch used to have to be parked until a child process had
+    /// handshaken.
+    worker: Mutex<Option<Worker>>,
     /// Dropping the watcher stops it, so it has to be held for as long as the
     /// operator wants the folder watched. `None` is the paused state.
-    watcher: Mutex<Option<notify::RecommendedWatcher>>,
-    /// Photos handed to the app before the sidecar was up - a drop on the Dock
-    /// icon can be what launches the app. Drained by the boot thread.
-    pending: Mutex<Vec<PathBuf>>,
-    /// What Ruby made of each overlay, keyed the same way its PNG is named. Not
-    /// persisted: the PNGs on disk are, and a render is cheap enough that losing
-    /// the map across a launch costs one pass through the panel.
+    watcher: Mutex<Option<watcher::Handle>>,
+    /// What the pipeline made of each overlay, keyed the same way its PNG is
+    /// named. Not persisted: the PNGs on disk are, and a render is cheap enough
+    /// that losing the map across a launch costs one pass through the panel.
     overlays: Mutex<overlays::Cache>,
     /// Held for the whole of one `overlays::refresh`, so only one runs at a time.
     ///
@@ -106,10 +119,11 @@ fn publish(app: &AppHandle, photo: &Photo) {
     let _ = app.emit("photo", photo);
 }
 
-/// Sends one photo through the sidecar and publishes the outcome.
+/// Sends one photo through the pipeline and publishes the outcome.
 ///
-/// Runs on its own thread: the sidecar handles one request at a time and a 12MP
-/// composite takes about a second, which is far too long to hold the UI.
+/// Called from a thread that is not the main one, and the composite itself is
+/// queued on the worker - so this blocks twice over and must never run on the UI
+/// thread. A 12MP composite takes about a second.
 fn process(app: AppHandle, source: PathBuf) {
     let state = app.state::<AppState>();
 
@@ -137,26 +151,61 @@ fn process(app: AppHandle, source: PathBuf) {
     photo.status = Status::Processing;
     publish(&app, &photo);
 
-    let sidecar = state.sidecar.lock().unwrap().clone();
-    let Some(sidecar) = sidecar else {
-        photo.fail(Problem::PipelineStarting.say());
+    let Some(worker) = state.worker.lock().unwrap().clone() else {
+        photo.fail(Problem::ImageToolsUnavailable { detail: "no worker".into() }.say());
         publish(&app, &photo);
         return;
     };
 
-    match sidecar.overlay(&source.display().to_string()) {
-        Ok(frame) => photo.complete(&frame),
-        Err(error) => {
-            // One bad photo must not take the app down, and the original is still
-            // sitting in the drop folder, so retrying is always possible. The
-            // sentence was already logged where it was built; this only adds
-            // which photo it was about.
-            log::error!("the photo was {}", source.display());
-            photo.fail(error);
+    // The config is read now, not inside the job, so a photo composites with the
+    // overlays that were live when it arrived rather than whatever the operator
+    // switched to while it waited in the queue.
+    let config = state.settings.lock().unwrap().pipeline_config(&app);
+    let preview_dir = match Index::preview_dir(&app) {
+        Ok(dir) => dir,
+        Err(payload) => {
+            photo.fail(payload);
+            publish(&app, &photo);
+            return;
         }
+    };
+
+    let outcome = worker
+        .submit(move || {
+            let pipeline = Pipeline::new(config.clone());
+            let outcome = pipeline.process(&source)?;
+            // **Previews are derived from the finished files**, and their
+            // destination is the app's own data directory - never the watched
+            // folder, where a JPEG preview would be composited in its turn and
+            // the pipeline would eat its own output forever.
+            let previews = snappr_core::Preview::new(config, preview_dir)
+                .call(&outcome.source, &outcome.destination)?;
+            Ok::<_, Problem>((outcome, previews))
+        })
+        .recv();
+
+    match outcome {
+        Ok(Ok((outcome, previews))) => photo.complete(outcome, previews),
+        Ok(Err(problem)) => {
+            // One bad photo must not take the app down, and the original is still
+            // sitting in the drop folder, so retrying is always possible. This
+            // adds which photo it was about; the sentence itself is the
+            // catalogue's.
+            log::error!("{}: {}", source_of(&photo), problem.log_line());
+            photo.fail(problem.payload());
+        }
+        // The worker thread died. Nothing else can be printed until the app is
+        // restarted, so say the same thing a broken install says.
+        Err(_) => photo.fail(
+            Problem::ImageToolsUnavailable { detail: "the worker stopped".into() }.say(),
+        ),
     }
     publish(&app, &photo);
     discard_superseded(superseded, &photo);
+}
+
+fn source_of(photo: &Photo) -> String {
+    photo.source.display().to_string()
 }
 
 /// The entry point for photos that arrive by hand - dropped on the window or on
@@ -236,15 +285,16 @@ fn add_overlays(app: &AppHandle, paths: Vec<PathBuf>) {
 /// `process`, so a drop behaves exactly like an AirDrop that landed in the folder.
 /// Only the stability wait is skipped: a dropped file is already complete.
 ///
-/// A drop on the Dock icon can also be what launches the app, in which case the
-/// sidecar is still starting. Those are parked in `pending` and released by the
-/// boot thread the moment the sidecar is up, rather than failed on the spot.
+/// A drop that arrives during launch needs no special handling any more. It used
+/// to be parked in a queue with its own lock discipline, because the Ruby child
+/// took about a second to start and a drop on the Dock icon can be what launches
+/// the app; the pipeline is now up before the window is.
 fn ingest_one(app: &AppHandle, path: PathBuf) -> Result<(), (PathBuf, Refusal)> {
     let state = app.state::<AppState>();
 
     let refusal = {
-        let settings = state.settings.lock().unwrap();
-        watcher::refusal(&path, &settings)
+        let config = state.settings.lock().unwrap().pipeline_config(app);
+        watcher::refusal(&path, &config)
     };
     if let Some(refusal) = refusal {
         // `watcher::refusal` does no I/O, because it runs on every filesystem
@@ -257,19 +307,11 @@ fn ingest_one(app: &AppHandle, path: PathBuf) -> Result<(), (PathBuf, Refusal)> 
         return Err((path, refusal));
     }
 
-    // Hold `pending` while looking at `sidecar`: the boot thread takes the same
-    // lock before it installs the sidecar and drains the queue, so a path can
-    // never fall between "not ready yet" here and the drain there.
-    let mut pending = state.pending.lock().unwrap();
-    if state.sidecar.lock().unwrap().is_some() {
-        drop(pending);
-        log::info!("{} handed to snappr, processing", path.display());
-        let handle = app.clone();
-        std::thread::spawn(move || process(handle, path));
-    } else {
-        log::info!("{} queued until the pipeline is ready", path.display());
-        pending.push(path);
-    }
+    log::info!("{} handed to snappr, processing", path.display());
+    // On a thread because `process` blocks twice: once on the worker queue and
+    // once on the composite. This is the event thread.
+    let handle = app.clone();
+    std::thread::spawn(move || process(handle, path));
     Ok(())
 }
 
@@ -288,9 +330,8 @@ fn ingest_one(app: &AppHandle, path: PathBuf) -> Result<(), (PathBuf, Refusal)> 
 ///
 /// `show`, never `blocking_show`: this runs on the event thread, and blocking
 /// there freezes the window.
-/// The catalogue entry for one refusal. A free function rather than a closure so
-/// the returned Problem can borrow the path it was given.
-fn refusal_problem<'a>(path: &'a Path, refusal: Refusal, accepted: &str) -> Problem<'a> {
+/// The catalogue entry for one refusal.
+fn refusal_problem(path: &Path, refusal: Refusal, accepted: &str) -> Problem {
     let file = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -300,7 +341,7 @@ fn refusal_problem<'a>(path: &'a Path, refusal: Refusal, accepted: &str) -> Prob
         Refusal::AlreadyAPrint => Problem::DropAlreadyAPrint { file },
         Refusal::IsAFolder => Problem::DropIsAFolder { file },
         Refusal::StillDownloading => Problem::DropStillDownloading { file },
-        Refusal::Unnamed => Problem::DropUnreadableName { path },
+        Refusal::Unnamed => Problem::DropUnreadableName { path: path.to_path_buf() },
         // Unknown reaches here only for an extensionless file that is not a
         // folder, which reads the same way to an operator as a wrong extension.
         Refusal::Unknown | Refusal::WrongKind => Problem::DropWrongKind {
@@ -325,7 +366,7 @@ fn explain_refusals(app: &AppHandle, refused: Vec<(PathBuf, Refusal)>) {
     // and the alert carries only the sentences.
     let mut sentences: Vec<String> = refused
         .iter()
-        .map(|(path, refusal)| refusal_problem(path, *refusal, &accepted).warn())
+        .map(|(path, refusal)| refusal_problem(path, *refusal, &accepted).warn().message)
         .collect();
 
     // One refusal reads as a sentence on its own; several want a lead-in and a
@@ -351,11 +392,12 @@ fn explain_refusals(app: &AppHandle, refused: Vec<(PathBuf, Refusal)>) {
         .show(|_| {});
 }
 
-fn start_watching(app: &AppHandle, settings: &Settings) -> Result<(), String> {
+fn start_watching(app: &AppHandle, settings: &Settings) -> Result<(), Payload> {
     let handle = app.clone();
-    // By value: the closure outlives this call, so it cannot borrow `settings`.
-    let timeout = settings.stability_timeout().as_secs();
-    let watcher = watcher::spawn(settings.watch_dir.clone(), settings.clone(), move |arrival| {
+    let config = settings.pipeline_config(app);
+    // By value: the closure outlives this call, so it cannot borrow anything here.
+    let timeout = config.stability_timeout_secs;
+    let watcher = watcher::spawn(config.watch_dir.clone(), config, move |arrival| {
         let handle = handle.clone();
         match arrival {
             Arrival::Settled(path) => {
@@ -375,15 +417,16 @@ fn start_watching(app: &AppHandle, settings: &Settings) -> Result<(), String> {
                 let mut photo = Photo::queued(path.clone());
                 let said = Problem::TransferStalled {
                     file: photo.name.clone(),
-                    path: &path,
+                    path,
                     secs: timeout,
                 }
                 .warn();
-                photo.fail(said);
+                photo.fail(Payload { code: said.kind, message: said.message });
                 publish(&handle, &photo);
             }
         }
-    })?;
+    })
+    .map_err(Problem::say)?;
 
     app.state::<AppState>()
         .watcher
@@ -402,9 +445,9 @@ fn start_watching(app: &AppHandle, settings: &Settings) -> Result<(), String> {
 /// `watch_enabled` back to false on failure but the boot path did not, so after a
 /// boot-time watch failure the bar said "Watching" over a folder nothing was
 /// looking at.
-fn start_watching_noted(app: &AppHandle, settings: &Settings) -> Result<(), String> {
+fn start_watching_noted(app: &AppHandle, settings: &Settings) -> Result<(), Payload> {
     let result = start_watching(app, settings);
-    set_watch_error(app, result.as_ref().err().cloned());
+    set_watch_error(app, result.as_ref().err().map(|payload| payload.message.clone()));
     result
 }
 
@@ -434,7 +477,7 @@ fn selected_photo(state: State<AppState>) -> Option<PathBuf> {
 /// Remembers the selection. Called on every change, which is fine: selection moves
 /// at human speed, and `publish` already saves the whole index per photo event.
 #[tauri::command]
-fn set_selected(app: AppHandle, state: State<AppState>, source: PathBuf) -> Result<(), String> {
+fn set_selected(app: AppHandle, state: State<AppState>, source: PathBuf) -> Result<(), Payload> {
     let mut index = state.index.lock().unwrap();
     if index.select(source) {
         index.save(&app)?;
@@ -450,9 +493,9 @@ fn get_settings(state: State<AppState>) -> Settings {
 /// Changing the watch directory restarts the watch in place, so the operator does
 /// not have to relaunch the app to point it somewhere else.
 #[tauri::command]
-fn set_watch_dir(app: AppHandle, state: State<AppState>, dir: PathBuf) -> Result<Settings, String> {
+fn set_watch_dir(app: AppHandle, state: State<AppState>, dir: PathBuf) -> Result<Settings, Payload> {
     if !dir.is_dir() {
-        return Err(Problem::NotAFolder { path: &dir }.say());
+        return Err(Problem::NotAFolder { path: dir }.say());
     }
 
     let updated = {
@@ -496,10 +539,12 @@ fn set_overlay(
     state: State<AppState>,
     orientation: Orientation,
     choice: Overlay,
-) -> Result<Settings, String> {
+) -> Result<Settings, Payload> {
     if let Overlay::Custom(path) = &choice {
         if !path.is_file() {
-            return Err(Problem::OverlayFileGone { file: name_of(path), path }.say());
+            return Err(
+                Problem::OverlayFileGone { file: name_of(path), path: path.clone() }.say()
+            );
         }
     }
 
@@ -509,7 +554,6 @@ fn set_overlay(
         settings.save(&app)?;
         settings.clone()
     };
-    push_overlays(&app, &state, &updated)?;
 
     // The resolved path rather than the choice, because that is what the pipeline
     // was actually handed and what a puzzled log reader needs to see.
@@ -522,17 +566,14 @@ fn set_overlay(
     Ok(updated)
 }
 
-/// Pushes the overlay settings to the running child so the next photo uses them.
-///
-/// No sidecar yet just means the boot handshake has not happened, and that sends
-/// these settings anyway - so saving is the whole job in that case.
-fn push_overlays(app: &AppHandle, state: &State<AppState>, settings: &Settings) -> Result<(), String> {
-    let sidecar = state.sidecar.lock().unwrap().clone();
-    let Some(sidecar) = sidecar else { return Ok(()) };
-    let preview_dir = Index::preview_dir(app)?;
-    sidecar.reconfigure(settings.pipeline_config(app), &preview_dir.display().to_string())?;
-    Ok(())
-}
+// `push_overlays` is gone, and nothing replaced it.
+//
+// It used to send the overlay settings to the running child, so the next photo
+// would use them - a `configure` frame that rebuilt the child's whole Config,
+// Overlay and Preview. There is no child and no copy of the settings to keep in
+// step: `process` reads `pipeline_config` when it queues a photo, so switching an
+// overlay takes effect on the next one by construction. Saving is now the whole
+// job of `set_overlay` and `remove_overlay`.
 
 /// The panel's cards, drawn or still being drawn.
 ///
@@ -554,15 +595,18 @@ fn list_overlays(app: AppHandle, state: State<AppState>) -> Vec<OverlayCard> {
 /// the operator lights the one they want - an add that took a slot would overwrite
 /// a choice they had already made.
 #[tauri::command]
-fn add_overlay(app: AppHandle, state: State<AppState>, path: PathBuf) -> Result<Settings, String> {
+fn add_overlay(app: AppHandle, state: State<AppState>, path: PathBuf) -> Result<Settings, Payload> {
     if !is_drawing(&path) || !path.is_file() {
-        return Err(Problem::OverlayNotADrawing { file: name_of(&path), path: &path }.say());
+        return Err(
+            Problem::OverlayNotADrawing { file: name_of(&path), path: path.clone() }.say()
+        );
     }
 
     let updated = {
         let mut settings = state.settings.lock().unwrap();
         if !settings.add_overlay(Overlay::Custom(path.clone())) {
-            return Err(Problem::OverlayAlreadyAdded { file: name_of(&path) }.warn());
+            let said = Problem::OverlayAlreadyAdded { file: name_of(&path) }.warn();
+            return Err(Payload { code: said.kind, message: said.message });
         }
         settings.save(&app)?;
         settings.clone()
@@ -581,7 +625,7 @@ fn add_overlay(app: AppHandle, state: State<AppState>, path: PathBuf) -> Result<
 /// sample cannot be removed at all; its card offers no Remove item, and
 /// `Settings::remove_overlay` refuses it as well.
 #[tauri::command]
-fn remove_overlay(app: AppHandle, state: State<AppState>, overlay: Overlay) -> Result<Settings, String> {
+fn remove_overlay(app: AppHandle, state: State<AppState>, overlay: Overlay) -> Result<Settings, Payload> {
     let updated = {
         let mut settings = state.settings.lock().unwrap();
         if !settings.remove_overlay(&overlay) {
@@ -592,10 +636,10 @@ fn remove_overlay(app: AppHandle, state: State<AppState>, overlay: Overlay) -> R
         settings.save(&app)?;
         settings.clone()
     };
-    // A removal can empty a slot, so the pipeline has to hear about it before the
-    // next photo - otherwise the child keeps compositing branding the panel no
-    // longer shows, which is the one thing the panel exists to prevent.
-    push_overlays(&app, &state, &updated)?;
+    // A removal can empty a slot, and the next photo reads the slots when it is
+    // queued - so the panel and the pipeline cannot disagree about what is live.
+    // This used to need a push to the child, whose own copy of the settings would
+    // otherwise have kept compositing branding the panel no longer showed.
 
     log::info!("removed the overlay {}", overlay.label());
     overlays::announce(&app);
@@ -616,7 +660,7 @@ fn remove_overlay(app: AppHandle, state: State<AppState>, overlay: Overlay) -> R
 /// item, not an "edit this" one. A card the operator added is their own file and
 /// has none of that.
 #[tauri::command]
-fn reveal_overlay(app: AppHandle, overlay: Overlay) -> Result<(), String> {
+fn reveal_overlay(app: AppHandle, overlay: Overlay) -> Result<(), Payload> {
     // Two different absences, and the operator can act on only one of them. A
     // custom overlay whose file has moved is theirs to put back; a sample this
     // build does not ship is not, so that one gets the generic sentence.
@@ -624,7 +668,7 @@ fn reveal_overlay(app: AppHandle, overlay: Overlay) -> Result<(), String> {
         return Err(Problem::FinderWontOpen { detail: format!("{} resolves to nothing", overlay.label()) }.say());
     };
     if !path.is_file() {
-        return Err(Problem::OverlayFileGone { file: name_of(&path), path: &path }.say());
+        return Err(Problem::OverlayFileGone { file: name_of(&path), path: path.clone() }.say());
     }
     reveal(&path)
 }
@@ -635,7 +679,7 @@ fn reveal_overlay(app: AppHandle, overlay: Overlay) -> Result<(), String> {
 /// left alone, and a kiosk that gave the photo back 180px on every launch would
 /// have to be collapsed again every morning.
 #[tauri::command]
-fn set_panel_collapsed(app: AppHandle, state: State<AppState>, collapsed: bool) -> Result<Settings, String> {
+fn set_panel_collapsed(app: AppHandle, state: State<AppState>, collapsed: bool) -> Result<Settings, Payload> {
     let mut settings = state.settings.lock().unwrap();
     settings.overlays_collapsed = collapsed;
     settings.save(&app)?;
@@ -646,7 +690,7 @@ fn set_panel_collapsed(app: AppHandle, state: State<AppState>, collapsed: bool) 
 /// choice is persisted, so a kiosk comes back the way it was left; the toggle in
 /// the bar always shows which.
 #[tauri::command]
-fn set_watching(app: AppHandle, state: State<AppState>, enabled: bool) -> Result<Settings, String> {
+fn set_watching(app: AppHandle, state: State<AppState>, enabled: bool) -> Result<Settings, Payload> {
     let updated = {
         let mut settings = state.settings.lock().unwrap();
         settings.watch_enabled = enabled;
@@ -676,7 +720,7 @@ fn set_watching(app: AppHandle, state: State<AppState>, enabled: bool) -> Result
 /// Re-runs a photo that failed, or one the operator wants regenerated after an
 /// overlay change. The original is always still on disk, so this is the retry.
 #[tauri::command]
-fn reprocess(app: AppHandle, state: State<AppState>, source: PathBuf) -> Result<(), String> {
+fn reprocess(app: AppHandle, state: State<AppState>, source: PathBuf) -> Result<(), Payload> {
     state.index.lock().unwrap().update(&source, |photo| {
         photo.status = Status::Queued;
         photo.error = None;
@@ -740,7 +784,7 @@ fn delete_preview(path: &Path) {
 /// A photo that is not in the index is already clear, so this succeeds rather than
 /// complaining - the operator asked for a state, not for an action.
 #[tauri::command]
-fn clear_photo(app: AppHandle, state: State<AppState>, source: PathBuf) -> Result<(), String> {
+fn clear_photo(app: AppHandle, state: State<AppState>, source: PathBuf) -> Result<(), Payload> {
     let gone = {
         let mut index = state.index.lock().unwrap();
         match index.remove(&source) {
@@ -763,7 +807,7 @@ fn clear_photo(app: AppHandle, state: State<AppState>, source: PathBuf) -> Resul
 /// after the operator cleared - and it is why this returns the count rather than
 /// leaving the UI to assume the strip is now empty.
 #[tauri::command]
-fn clear_all_photos(app: AppHandle, state: State<AppState>) -> Result<usize, String> {
+fn clear_all_photos(app: AppHandle, state: State<AppState>) -> Result<usize, Payload> {
     let gone = {
         let mut index = state.index.lock().unwrap();
         let gone = index.drain();
@@ -780,11 +824,11 @@ fn runtime_status(state: State<AppState>) -> RuntimeStatus {
 
 /// The finished PNG for a photo, or a reason there isn't one. Share, print and
 /// reveal all act on the print artefact, never on the source or a preview.
-fn destination_of(state: &State<AppState>, source: &Path) -> Result<(PathBuf, bool), String> {
+fn destination_of(state: &State<AppState>, source: &Path) -> Result<(PathBuf, bool), Payload> {
     let index = state.index.lock().unwrap();
     let photo = index
         .get(source)
-        .ok_or_else(|| Problem::PhotoForgotten { path: source }.say())?;
+        .ok_or_else(|| Problem::PhotoForgotten { path: source.to_path_buf() }.say())?;
     if photo.status != Status::Done {
         return Err(Problem::PhotoStillWorking.say());
     }
@@ -793,7 +837,7 @@ fn destination_of(state: &State<AppState>, source: &Path) -> Result<(PathBuf, bo
         .clone()
         .filter(|d| d.exists())
         .ok_or_else(|| Problem::PrintFileGone.say())?;
-    Ok((destination, photo.orientation.as_deref() == Some("landscape")))
+    Ok((destination, photo.orientation == Some(Orientation::Landscape)))
 }
 
 /// Shares the overlay PNG itself - 10-25 MB, and 16-bit when the source was HEIC.
@@ -805,13 +849,13 @@ fn share_photo(
     state: State<AppState>,
     source: PathBuf,
     anchor: mac::Anchor,
-) -> Result<(), String> {
+) -> Result<(), Payload> {
     let (destination, _) = destination_of(&state, &source)?;
     mac::share(&window, &destination, anchor)
 }
 
 #[tauri::command]
-fn print_photo(window: WebviewWindow, state: State<AppState>, source: PathBuf) -> Result<(), String> {
+fn print_photo(window: WebviewWindow, state: State<AppState>, source: PathBuf) -> Result<(), Payload> {
     let (destination, landscape) = destination_of(&state, &source)?;
     let paper = state.settings.lock().unwrap().print_paper_name.clone();
     // The job is named after the SOURCE, not the PNG being printed: the
@@ -822,7 +866,7 @@ fn print_photo(window: WebviewWindow, state: State<AppState>, source: PathBuf) -
 }
 
 /// Finder, with the file selected.
-fn reveal(path: &Path) -> Result<(), String> {
+fn reveal(path: &Path) -> Result<(), Payload> {
     std::process::Command::new("open")
         .arg("-R")
         .arg(path)
@@ -837,7 +881,7 @@ fn reveal(path: &Path) -> Result<(), String> {
 
 /// Finder, with the PNG selected. The escape hatch for anything the app cannot do.
 #[tauri::command]
-fn reveal_photo(state: State<AppState>, source: PathBuf) -> Result<(), String> {
+fn reveal_photo(state: State<AppState>, source: PathBuf) -> Result<(), Payload> {
     let (destination, _) = destination_of(&state, &source)?;
     reveal(&destination)
 }
@@ -883,10 +927,9 @@ pub fn run() {
         .manage(AppState {
             settings: Mutex::new(Settings::default()),
             index: Mutex::new(Index::default()),
-            sidecar: Mutex::new(None),
             runtime: Mutex::new(RuntimeStatus::default()),
+            worker: Mutex::new(None),
             watcher: Mutex::new(None),
-            pending: Mutex::new(Vec::new()),
             overlays: Mutex::new(overlays::Cache::new()),
             drawing: Mutex::new(()),
         })
@@ -933,34 +976,24 @@ pub fn run() {
             *state.settings.lock().unwrap() = settings.clone();
             *state.index.lock().unwrap() = Index::load(&handle);
 
-            // The sidecar is started in the background so a slow or broken runtime
-            // shows up as an error in the UI rather than as an app that never opens.
+            // Still on a thread of its own, though it no longer needs to be for
+            // speed: starting the pipeline is now one libvips init rather than a
+            // Ruby interpreter and a handshake. What it buys is that a *broken*
+            // install shows up as an error in the window rather than as an app
+            // that never opens.
             let boot = handle.clone();
             std::thread::spawn(move || {
-                let started = Runtime::detect(&boot).and_then(|runtime| {
-                    let preview_dir = Index::preview_dir(&boot)?;
-                    Sidecar::start(
-                        &runtime,
-                        settings.pipeline_config(&boot),
-                        &preview_dir.display().to_string(),
-                    )
-                });
+                let started = Worker::start();
 
                 match started {
-                    Ok(sidecar) => {
-                        // Install the sidecar and take whatever was dropped on us
-                        // before it was ready, under the same lock `ingest` holds
-                        // while it decides between "process now" and "queue".
-                        let queued = {
-                            let state = boot.state::<AppState>();
-                            let mut pending = state.pending.lock().unwrap();
-                            state.sidecar.lock().unwrap().replace(Arc::new(sidecar));
-                            std::mem::take(&mut *pending)
-                        };
-                        for path in queued {
-                            let handle = boot.clone();
-                            std::thread::spawn(move || process(handle, path));
-                        }
+                    Ok(worker) => {
+                        boot.state::<AppState>().worker.lock().unwrap().replace(worker);
+
+                        // Nothing to drain. A drop that arrives during launch is
+                        // handled where it lands, because there is no longer a
+                        // window in which the pipeline is merely not up yet - the
+                        // `pending` queue and its lock discipline went with the
+                        // child process.
 
                         // The pipeline is usable either way here: a watch that
                         // failed to start still leaves drops, `mise run overlay`
@@ -978,7 +1011,9 @@ pub fn run() {
                         // status is set wholesale below, so going through the
                         // noted variant would emit the event twice.
                         let watch_failed = if settings.watch_enabled {
-                            start_watching(&boot, &settings).err()
+                            start_watching(&boot, &settings)
+                                .err()
+                                .map(|payload| payload.message)
                         } else {
                             log::info!("watching is paused, not watching {}", settings.watch_dir.display());
                             None
@@ -999,12 +1034,18 @@ pub fn run() {
                         // through above. The panel shows skeletons until they land.
                         overlays::refresh(boot.clone());
                     }
-                    Err(error) => {
+                    Err(detail) => {
+                        // libvips could not be initialised, which means a broken
+                        // install rather than a broken photo. One message where
+                        // there used to be seven, because there is no longer a
+                        // child process to be starting, unreachable or wedged.
                         set_runtime_status(
                             &boot,
                             RuntimeStatus {
                                 ready: false,
-                                error: Some(error),
+                                error: Some(
+                                    Problem::ImageToolsUnavailable { detail }.say().message,
+                                ),
                                 watch_error: None,
                                 notice: reset,
                             },
@@ -1018,12 +1059,12 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building snappr")
         .run(|app, event| match event {
-            // Closing stdin is the documented shutdown for `Server#run`, which reads
-            // to EOF. Without this the child outlives the app.
+            // Dropping the worker handle ends its thread once the queue drains, so
+            // a composite that is already running finishes rather than being cut
+            // off mid-write. There is no process to kill any more: this used to
+            // have to close a pipe and reap a child.
             tauri::RunEvent::ExitRequested { .. } => {
-                if let Some(sidecar) = app.state::<AppState>().sidecar.lock().unwrap().take() {
-                    sidecar.shutdown();
-                }
+                app.state::<AppState>().worker.lock().unwrap().take();
             }
             // Files dropped on the Dock icon, or opened with snappr from Finder.
             // macOS delivers these to the running instance directly, so the

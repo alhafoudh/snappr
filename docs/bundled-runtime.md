@@ -1,171 +1,172 @@
-# The bundled runtime
+# The bundled libvips
 
-`Snappr.app` ships its own Ruby and its own libvips, so it runs on an operator's
-Mac that has never heard of Homebrew. `mise run runtime` builds the lot into
-`build/`, which is gitignored - **the scripts are the source of truth, not their
-output.**
+`Snappr.app` ships its own libvips, so it runs on an operator's Mac that has never
+heard of Homebrew. `mise run runtime` builds it into `build/`, which is gitignored
+- **the tasks are the source of truth, not their output.**
 
 ```
-mise run runtime          all five stages, in order
-mise run runtime-ruby     bin/build-runtime      the relocatable interpreter
-mise run runtime-libvips  bin/build-libvips      libvips from source
-mise run runtime-vips     bin/build-vips         the relocated dependency closure
-mise run runtime-gems     bin/build-gems         the vendored gems
-mise run runtime-verify   bin/verify-bundle      the gate
+mise run runtime           all of it, in order
+mise run runtime-libvips   cargo xtask libvips   libvips from source
+mise run runtime-closure   cargo xtask closure   the relocated dependency closure
+mise run runtime-verify    cargo xtask verify    the gate
 ```
 
-**Order matters**: `build-vips` walks the dependency closure of the libvips that
-`build-libvips` produces, so it cannot run first. The individual tasks exist for
-iterating on one stage.
+**Order matters**: `closure` walks the dependency closure of the libvips that
+`libvips` produces, and `verify` runs a binary linked against what `closure`
+relocated. The individual tasks exist for iterating on one stage.
 
-**Each script's header carries the full argument** - which configure flag exists
+**Each module's header carries the full argument** - which configure flag exists
 for what, which alternative was measured and rejected, and what the failure looks
-like. This file is the map and the short version; read the header before changing
-a stage.
+like. This file is the map and the short version; read the header in
+`crates/xtask/src/` before changing a stage.
 
-## What shapes the layout: codesigning
+This document used to describe five stages. Two of them built a relocatable CRuby
+3.4.5 from source and vendored gems standalone, because the pipeline was Ruby and
+a child interpreter had to ship inside the app. **That half never shipped**:
+`bundle.resources` named only `sample/`, so the bundle layout below was never
+assembled and the app spawned the repo's development Ruby instead. The pipeline is
+Rust now, and what is left is one dependency.
 
-Tauri signs nested code in `MacOS`, `Frameworks`, `Plugins`, `Helpers`,
-`XPCServices` and `Libraries` - **notably not `Resources`**. So every Mach-O file
-has to land in one of those, and only inert data may go in `Resources`. That single
-constraint is why the Ruby stdlib is built with no `.bundle` files at all, why
-`Contents/Frameworks` must stay flat, and why the planned bundle layout in
-`runtime.rs` splits the pieces the way it does.
+## Which libvips gets linked, and when
 
-The bundle layout is still unwired - `bundle.resources` names `sample/` and
-nothing else - so `Runtime::detect` always takes the development branch today. See
-`docs/desktop-app.md`.
+Two profiles, two answers, and the reason is that a debug build must work on a
+fresh clone while a release build must not depend on the machine that made it.
 
-## `bin/build-runtime` - the interpreter
+| profile | links | resolved at runtime by |
+|---|---|---|
+| debug | `build/libvips-prefix`, or Homebrew if that has not been built | the absolute install name meson wrote |
+| release | `build/link`, whose symlinks point into `build/vips` | `LC_RPATH`, giving `Contents/Frameworks` or `build/vips` |
 
-**mise's Ruby cannot ship.** Its prefix is compiled in, so a copied binary looks
-for its stdlib back in `~/.local/share/mise`, and it links out to Homebrew's
-libgmp.
+`crates/snappr-core/build.rs` decides that from `PROFILE`, and it is worth knowing
+why the debug case avoids `@rpath` entirely: `cargo:rustc-link-arg` and its
+`-tests` variant do not reach a library crate's own unit-test harness, so a debug
+build that needed an rpath would fail `cargo test` with "Library not loaded:
+@rpath/libvips.42.dylib" while `cargo run` worked perfectly.
 
-The flags that matter:
+**Homebrew is a development fallback and never a bundle.** Homebrew's libvips
+dlopens its format support - including HEIC - from a module directory baked in at
+compile time, so a copied Homebrew libvips silently cannot decode an iPhone photo.
+That is the whole reason libvips is built here at all, and `verify` is what
+catches a bundle that borrowed it.
 
-- `--enable-load-relative` - the whole point. The binary finds its stdlib at
-  `<bin>/../lib/ruby/<ver>` instead of the compiled-in prefix.
-- `--disable-shared` - links libruby into the binary. One less dylib to relocate
-  and one less Mach-O to sign.
-- `--with-static-linked-ext` - links every stdlib C extension in, so there are no
-  stdlib `.bundle` files at all. This matters more than it looks, and the reason
-  is the codesigning rule above: a surviving `.bundle` under `Resources` would
-  have to be moved into `Contents/Frameworks` by hand and would fail notarization
-  if it were missed.
-- `--with-libyaml-dir` at a staging directory holding only `libyaml.a`, so psych
-  links it statically. psych is not optional: it reads `config/snappr.yml`.
-- `--without-gmp` and `--with-out-ext=...` drop Homebrew dylibs (libssl,
-  libcrypto, libreadline, libncurses, libgdbm) that snappr cannot reach anyway.
+## What shapes the layout: install names
 
-openssl is excluded deliberately: snappr does no network I/O, the bundled app
-never installs gems, `SecureRandom` uses `Random.urandom`, and digest is its own
-extension. The header justifies it at length - read it before adding it back.
+Three libraries are named from *outside* `Contents/Frameworks`, because the
+binaries that link them live in `Contents/MacOS`:
 
-## `bin/build-libvips` - libvips from source
+```
+Snappr.app/Contents/
+  MacOS/Snappr              LC_RPATH: @executable_path/../Frameworks, and build/vips
+  Frameworks/*.dylib        45 dylibs, copied and codesigned by Tauri
+    libvips.42.dylib          id @rpath/...        linked directly
+    libglib-2.0.0.dylib       id @rpath/...        linked directly
+    libgobject-2.0.0.dylib    id @rpath/...        linked directly
+    everything else           id @loader_path/...  only ever loaded by a sibling
+  Resources/sample/         the one overlay that ships
+```
 
-**Not Homebrew's, because it cannot be relocated.** From 8.16 libvips ships its
-format support as modules it dlopens at runtime from
-`<libdir>/vips-modules-<major>.<minor>/`, and `libdir` is **not** derived from the
-library's own location: `guess_prefix()` tests the compile-time `VIPS_LIBDIR`
-first and returns the compile-time prefix if the module directory exists there.
+`@loader_path` for an executable means *the executable's own directory*, so an
+`@loader_path` id on libvips would have the app looking for it in
+`Contents/MacOS`. Hence the split - and the sibling references to those three are
+rewritten to `@loader_path` anyway, so both routes work at once.
 
-So a copied Homebrew libvips loads its modules back out of the Cellar, dragging a
-second copy of libvips and glib into the process - visible as an objc
-duplicate-class warning - after which `heifload` resolves against the wrong
-instance and reports itself unavailable. On a machine with no Homebrew there are
-no modules at all, and no HEIC support.
+**glib and gobject are on that list because `rs-vips` links them directly**: it
+calls GObject to manage image lifetimes, and emits `-lglib-2.0 -lgobject-2.0`
+alongside `-lvips`. Miss them and a binary links Homebrew's glib by absolute path
+while libvips resolves to the bundled one - two copies of glib in one process,
+which segfaults inside `vips_init` with nothing in the message about glib. That
+was a real afternoon.
 
-**`-Dmodules=disabled` removes the whole problem**: heif, rsvg, png and jpeg are
-linked directly into `libvips.42.dylib`, so a dependency walk can see everything
-and `Contents/Frameworks` stays flat.
+`build/link` exists for the linker only: `-lglib-2.0` resolves to
+`libglib-2.0.dylib`, an unversioned name the flat closure does not have. Its
+symlinks live outside `build/vips` so that directory stays exactly what ships -
+`closure` asserts it holds no links at all.
 
-**Not sharp's prebuilt libvips either.** `@img/sharp-libvips-darwin-arm64` is a
-single 18 MB dylib with no third-party dependencies and it very nearly works - it
-loads clean, renders SVG, and reports `heifload` as present. But it cannot decode
-HEVC, because sharp excludes it for patent-licensing reasons and supports only
-AVIF in HEIF containers. **iPhone HEICs are HEVC.** Note that its header read
-succeeded: libvips is lazy, so only a real pixel decode of a real HEVC file
-catches this - which is exactly why `verify-bundle` exists.
+## `cargo xtask libvips` - libvips from source
 
-Turned off: everything snappr cannot reach. magick, poppler, openslide and jpeg-xl
-were the module formats; openexr dragged in the whole OpenEXR/IlmThread family
-through `@rpath`; pangocairo and fontconfig are only for vips' own text rendering,
-which this pipeline never uses - text in an overlay is drawn by librsvg, which
-brings its own pango.
+libvips 8.18.4, tarball SHA-256 pinned, built with meson into
+`build/libvips-prefix`.
 
-## `bin/build-vips` - relocating the closure
+**`-Dmodules=disabled` is the point of the exercise.** It links the format loaders
+*into* the library instead of leaving them in a module directory beside it, which
+is what makes the closure relocatable. The `report` step asserts no
+`vips-modules-*` directory exists, because that is the symptom of getting it wrong.
 
-Homebrew's dylibs reference each other by absolute path, so a copy of libvips
-taken as-is still loads Homebrew's glib, and on a machine with no Homebrew loads
-nothing. Every reference is rewritten to `@loader_path`, which is what makes a
-flat directory of dylibs work wherever it is put.
+`heif rsvg jpeg png lcms exif zlib tiff` are `enabled`, not `auto`: a missing
+dependency must fail the build loudly here rather than silently produce a libvips
+that cannot read what gets AirDropped. Thirty other features are `disabled`, and
+meson's split between "feature" options and plain booleans is why there are two
+lists - passing `disabled` to a boolean fails setup with `Option "nsgif" value
+disabled is not boolean`.
 
-Four things are load-bearing, and the header states them as such:
+Rejected: Homebrew (the module directory), and sharp's prebuilt libvips - it
+cannot decode HEVC, and iPhone HEICs are HEVC.
 
-1. **Files are keyed by the basename of the install name, not of the real file.**
-   Homebrew's `libpng16.16.dylib` is a symlink to a versioned file, but every
-   dependent records the symlink's name. Copy the real bytes under the name the
-   dependents ask for, or nothing resolves.
-2. **`@rpath` dependencies have to be followed too.** Some formulae refer to
-   siblings as `@rpath/libfoo.dylib`, and resolving that needs the dependent's own
-   `LC_RPATH` entries, which are themselves often `@loader_path`-relative. A walk
-   that follows only absolute paths drops those silently and libvips fails to
-   dlopen.
-3. **The directory must end up flat, with only real Mach-O files.** Tauri's
-   bundler runs codesign over everything in `Contents/Frameworks` and aborts on
-   the first thing it cannot sign, so a stray symlink or subdirectory is a build
-   failure much later and far from its cause.
-4. **`install_name_tool` invalidates the signature**, so each file is re-signed
-   ad-hoc afterwards. Tauri re-signs with the Developer ID at bundle time, but
-   dyld refuses to load a file whose signature is present and wrong - which makes
-   this fail during development rather than at distribution.
+## `cargo xtask closure` - relocating the closure
 
-## `bin/build-gems` - the vendored gems
+Breadth-first over `otool -L` from libvips, copying every vendored library into
+`build/vips` and rewriting its install names. 45 dylibs, about 36 MB.
 
-**`bundle install --standalone` is what makes this work.** It generates a
-`bundler/setup.rb` that only manipulates `$LOAD_PATH` using `__dir__`-relative
-paths, so the bundled app needs neither bundler nor rubygems at runtime and the
-tree can be copied into the `.app` unchanged. That is also why the sidecar can be
-launched with `ruby --disable-gems`, which is faster to boot.
+Three things here were each learned the hard way and are asserted at the end:
 
-**It runs under mise's Ruby, not the bundled one**, because the bundled
-interpreter is built without openssl and cannot fetch over HTTPS. That is safe and
-it was checked rather than assumed: the only gem with a compiled artefact is ffi,
-and its precompiled arm64-darwin binary links nothing but libSystem, leaving its
-`_rb_*` symbols to resolve against the host process at load time.
+- **The walk follows `@rpath` references, not only absolute ones.** Homebrew's
+  OpenEXR names libIlmThread as `@rpath/libIlmThread-3_4.33.dylib`, so a walk that
+  followed absolute paths alone silently dropped the whole OpenEXR family - and
+  the resulting libvips then failed to load with nothing saying why on a machine
+  that had Homebrew to fall back on.
+- **Libraries are keyed by the basename of the install *name*, not of the real
+  file.** Homebrew's `libpng16.16.dylib` is a symlink and dependents record the
+  symlink's name.
+- **Every rewritten file is re-signed.** `install_name_tool` invalidates the
+  signature, and dyld refuses a present-but-wrong one - so an unsigned rewrite
+  fails at launch rather than here.
 
-Two things are left out on purpose: the `:watch` group (listen, rb-fsevent - Rust
-watches the folder inside the app, and rb-fsevent ships a compiled helper that
-would be one more Mach-O to sign), and ffi's ABI directories for every Ruby but
-ours (six copies of `ffi_c.bundle`, five of them dead signing surface). The kept
-ABI directory is **derived from `RUBY_VERSION`, never hardcoded** - pinning the
-wrong one prunes the only copy that matters.
+It also writes `src-tauri/tauri.frameworks.json`, the `bundle.macOS.frameworks`
+list Tauri needs. Generated rather than maintained: the task that decides which
+dylibs exist is the one that should write the list, and 45 paths are not something
+to keep by hand. `mise run app` merges it with `--config`.
 
-## `bin/verify-bundle` - the gate
+## `cargo xtask verify` - the gate
 
-**This is the stage that matters, and it exists because of a specific trap.** FFI
-hardcodes `/opt/homebrew/lib` into its library search path on macOS arm64, second
-only to `LD_LIBRARY_PATH`. So a bundle that is missing a dylib **does not fail
-here** - it silently borrows Homebrew's copy, passes every test on this machine,
-and fails on the operator's Mac where Homebrew does not exist.
+Runs `target/release/snappr-cli inspect` on a HEIC, in a stripped environment,
+with `DYLD_PRINT_LIBRARIES=1`.
 
-The structural checks in `build-vips` cannot catch it either: the thing that went
-missing the first time round was not reachable from `otool` at all, because
-libvips dlopened its format support at runtime, so the closure had no HEIC support
-and no libheif and a dependency walk had no way to know.
+Six checks, and the last is the only one that cannot be faked by the machine it
+runs on:
 
-Hence the two-part test, and **passing the first without the second means
-nothing**:
+1. the HEIC header reads back at 2400x1600
+2. **the HEVC pixels actually decode** - the mean of a flat patch is the value
+   that went in. A header read is lazy; this is the check sharp's libvips fails
+3. the HEIC loader was the one used, not some fallback
+4. bit depth is preserved as 8
+5. libvips reports its version
+6. **nothing loaded from Homebrew** - every path dyld reports is checked, and one
+   line from `/opt/homebrew` fails the build
 
-1. Run the real pipeline on a real HEIC inside the bundled runtime.
-2. Assert via `DYLD_PRINT_LIBRARIES` that not one library came from
-   `/opt/homebrew`.
+Passing the first five without the sixth means nothing: dyld will quietly satisfy
+a missing library from `/opt/homebrew/lib` and say so nowhere. Last run: 784
+libraries loaded, 0 of them from Homebrew.
 
-`LD_LIBRARY_PATH`, not `DYLD_LIBRARY_PATH`, is what points FFI at the bundled
-libvips - FFI reads both from Ruby's `ENV` and does the path joining itself in
-Ruby, so it works even though it means nothing to dyld on macOS, and unlike
-`DYLD_*` it is not stripped under hardened runtime. That removes the need for the
-`com.apple.security.cs.allow-dyld-environment-variables` entitlement. The running
-app sets the same variable for the same reason - see `Runtime::env` in
-`runtime.rs` and `docs/desktop-app.md`.
+The HEIC fixture is written by `cargo test -p snappr-core --test fixtures`, using
+the *system* libvips - it has to come from somewhere other than the thing under
+test, since the claim is that the bundled libvips decodes a file it did not
+create. It is not committed: a binary in the repo is a binary nobody can review.
+
+**What this proves, precisely**: that a binary linked the way the app is linked
+runs with nothing from Homebrew. It does not open the assembled `.app`. The app
+binary carries the same two rpaths and links the same libvips, and `mise run app`
+puts the same closure into `Contents/Frameworks`, so the linkage under test is the
+shipped one - but if that ever stops being true, this is the sentence that was
+wrong.
+
+## Entitlements
+
+`hardenedRuntime` is on, and `entitlements.plist` carries
+`com.apple.security.cs.disable-library-validation` because the closure is ad-hoc
+signed while the app is not signed with the same identity.
+
+It deliberately does **not** ask for
+`com.apple.security.cs.allow-dyld-environment-variables`, and it does not need to:
+libvips is found through `LC_RPATH`, which hardened runtime does not strip. The
+Ruby child needed `LD_LIBRARY_PATH` only because its FFI layer read that variable
+itself and joined the paths by hand.

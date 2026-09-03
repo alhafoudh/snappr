@@ -13,13 +13,24 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use tauri::{AppHandle, Manager};
 
-use crate::problem::{detail, Problem};
+use crate::problem::{detail, Payload, Problem};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// The three display JPEGs, as the pipeline names them.
+///
+/// Re-exported rather than redeclared: this shape crossed a process boundary as
+/// JSON once, and there is no boundary left for it to drift across.
+pub use snappr_core::preview::Previews;
+
+/// What the camera said, as the pipeline read it off the source header.
+pub use snappr_core::exif::Exif;
+
+use snappr_core::config::Orientation;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "lowercase")]
+#[ts(export)]
 pub enum Status {
     Queued,
     Processing,
@@ -27,58 +38,40 @@ pub enum Status {
     Failed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Previews {
-    pub thumb: PathBuf,
-    pub overlay: PathBuf,
-    pub source: PathBuf,
-}
+// `Previews` and `Exif` used to be declared here, field for field, mirroring
+// structs on the Ruby side that crossed the wire as JSON. They are re-exported
+// from `snappr-core` above instead: display data the pipeline produces, and one
+// declaration is now enough. Note what `Exif` being the pipeline's own type
+// buys - the values arrive already formatted for a person to read ("f/1.8",
+// "1/120s", "6.8mm"), because the tag-by-tag knowledge of how to spell them
+// belongs next to the tags.
 
-/// What the camera said about the photo, as `Snappr::Exif` read it off the source.
-///
-/// Display data only: nothing here reaches the crop, the layout or the pixels. The
-/// values arrive already formatted for a person to read ("f/1.8", "1/120s", "6.8mm"),
-/// because the tag-by-tag knowledge of how to spell them belongs next to the tags.
-///
-/// Every field is independently optional, and cameras vary wildly in what they write -
-/// a screenshot or a scan carries none of them, which is why the whole struct is an
-/// `Option` on `Photo` rather than a default-empty one.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Exif {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub camera: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub lens: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub focal_length: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub focal_length_35mm: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub aperture: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub shutter: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub iso: Option<u32>,
-    /// ISO 8601, and naive when the camera recorded no zone - EXIF keeps the offset in
-    /// a separate tag that plenty of cameras never write.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub taken_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, optional_fields)]
 pub struct Photo {
     /// The source path, which is also the identity: one photo on disk, one record.
     pub source: PathBuf,
     pub name: String,
     pub status: Status,
+    /// `number`, not `bigint`: ts-rs maps `u64` to `bigint` by default, and the
+    /// frontend does arithmetic on this to render "added 3 minutes ago". A unix
+    /// timestamp is nowhere near `Number.MAX_SAFE_INTEGER`.
+    #[ts(type = "number")]
     pub added_at: u64,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub destination: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub previews: Option<Previews>,
+    /// **The enum, not a string.** This was `Option<String>` filled from whatever
+    /// the child process had put in a JSON field, while the frontend narrowed it
+    /// to `"landscape" | "portrait"` and nothing checked that it was either. One
+    /// place in Rust then compared it against the literal `"landscape"`.
+    ///
+    /// An old `index.json` still loads: serde reads the same two lower-case
+    /// spellings it wrote.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub orientation: Option<String>,
+    pub orientation: Option<Orientation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_width: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -86,6 +79,8 @@ pub struct Photo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub depth: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Same reason: the info line divides this by 1024 twice to show megabytes.
+    #[ts(type = "number")]
     pub bytes: Option<u64>,
     /// Absent on every record written before this field existed, and on every photo
     /// that carries no camera tags. Both are ordinary, so this is `Option` rather than
@@ -132,49 +127,34 @@ impl Photo {
         }
     }
 
-    /// Fills the record in from a successful `overlay` response.
-    pub fn complete(&mut self, frame: &Value) {
-        let str_at = |key: &str| frame.get(key).and_then(Value::as_str).map(PathBuf::from);
-        let u32_at = |key: &str| frame.get(key).and_then(Value::as_u64).map(|v| v as u32);
-
+    /// Fills the record in from a finished composite.
+    ///
+    /// **Typed, by move.** This used to take the raw JSON frame the Ruby child
+    /// sent and pick fields out of it by string key, which meant a renamed field
+    /// silently became `None` and a malformed `exif` was silently dropped - both
+    /// on the path where the print had already been written. The pipeline hands
+    /// over its own structs now, so neither is expressible.
+    pub fn complete(&mut self, outcome: snappr_core::overlay::Outcome, previews: Previews) {
         self.status = Status::Done;
-        self.destination = str_at("destination");
-        self.orientation = frame.get("orientation").and_then(Value::as_str).map(String::from);
-        self.output_width = u32_at("output_width");
-        self.output_height = u32_at("output_height");
-        self.depth = frame.get("depth").and_then(Value::as_u64).map(|v| v as u8);
-        self.bytes = frame.get("bytes").and_then(Value::as_u64);
-        // Ruby omits the key rather than sending an empty object, so this is None for a
-        // photo with no camera tags. Unparseable EXIF is not worth failing the photo
-        // over either - the print is what matters and it is already written.
-        self.exif = frame
-            .get("exif")
-            .cloned()
-            .and_then(|value| serde_json::from_value(value).ok());
+        self.destination = Some(outcome.destination);
+        self.orientation = Some(outcome.orientation);
+        self.output_width = Some(outcome.output_width as u32);
+        self.output_height = Some(outcome.output_height as u32);
+        self.depth = Some(outcome.depth);
+        self.bytes = Some(outcome.bytes);
+        // `None` for a photo that carries no camera tags, which is ordinary.
+        self.exif = outcome.exif;
         self.error = None;
-
-        self.warnings = frame
-            .get("warnings")
-            .and_then(Value::as_array)
-            .map(|list| {
-                list.iter()
-                    .filter_map(|w| w.get("message").and_then(Value::as_str).map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        self.previews = frame.get("previews").and_then(|p| {
-            Some(Previews {
-                thumb: PathBuf::from(p.get("thumb")?.as_str()?),
-                overlay: PathBuf::from(p.get("overlay")?.as_str()?),
-                source: PathBuf::from(p.get("source")?.as_str()?),
-            })
-        });
+        // The operator's half of each warning. The `kind` is dropped here on
+        // purpose: the cell shows a sentence, and anything that wants to branch on
+        // the code reads it from the payload instead.
+        self.warnings = outcome.warnings.into_iter().map(|warning| warning.message).collect();
+        self.previews = Some(previews);
     }
 
-    pub fn fail(&mut self, error: String) {
+    pub fn fail(&mut self, error: Payload) {
         self.status = Status::Failed;
-        self.error = Some(error);
+        self.error = Some(error.message);
     }
 
     /// The files this record owns outright, and which therefore go when it does.
@@ -243,18 +223,18 @@ impl From<Stored> for (Vec<Photo>, Option<PathBuf>) {
 }
 
 impl Index {
-    pub fn path(app: &AppHandle) -> Result<PathBuf, String> {
+    pub fn path(app: &AppHandle) -> Result<PathBuf, Payload> {
         Ok(Self::data_dir(app)?.join("index.json"))
     }
 
-    pub fn preview_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    pub fn preview_dir(app: &AppHandle) -> Result<PathBuf, Payload> {
         let dir = Self::data_dir(app)?.join("previews");
         std::fs::create_dir_all(&dir)
             .map_err(|e| Problem::CannotRememberPhotos { detail: format!("{}: {e}", dir.display()) }.say())?;
         Ok(dir)
     }
 
-    fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    fn data_dir(app: &AppHandle) -> Result<PathBuf, Payload> {
         let dir = app
             .path()
             .app_data_dir()
@@ -286,7 +266,7 @@ impl Index {
         Self { photos, selected }
     }
 
-    pub fn save(&self, app: &AppHandle) -> Result<(), String> {
+    pub fn save(&self, app: &AppHandle) -> Result<(), Payload> {
         let path = Self::path(app)?;
         let stored = Stored::Current {
             photos: self.photos.clone(),

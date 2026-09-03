@@ -1,7 +1,8 @@
-# Bundler. Gemfile.lock is deliberately NOT ignored: snappr is an application,
-# not a gem, so the lock belongs in the repo.
-/.bundle/
-/vendor/bundle/
+# The list of dylibs Tauri copies into Contents/Frameworks, written by
+# `cargo xtask closure` from what it actually put in build/vips. Derived from
+# gitignored output, so it is gitignored too - `mise run app` regenerates it
+# before every bundle.
+/src-tauri/tauri.frameworks.json
 
 # macOS
 .DS_Store
@@ -20,6 +21,9 @@
 # Tauri / frontend build output.
 /node_modules/
 /dist/
+# Cargo builds into the workspace root now that src-tauri is a member, so the
+# old /src-tauri/target/ path no longer catches anything.
+/target/
 /src-tauri/target/
 /src-tauri/gen/
 /src-tauri/binaries/

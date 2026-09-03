@@ -29,7 +29,7 @@ use objc2_app_kit::{
 use objc2_foundation::{NSArray, NSPoint, NSRect, NSRectEdge, NSSize, NSString, NSURL};
 use tauri::{Manager, WebviewWindow};
 
-use crate::problem::{detail, Level, Problem};
+use crate::problem::{detail, Level, Notify, Payload, Problem};
 
 /// 100 x 148 mm in PostScript points (72 per inch).
 const SHORT_PT: f64 = 100.0 / 25.4 * 72.0;
@@ -44,7 +44,12 @@ thread_local! {
 }
 
 /// Where on screen the Share button is, in CSS pixels relative to the webview.
-#[derive(Debug, Clone, Copy, serde::Deserialize)]
+///
+/// Exported to TypeScript like everything else that crosses the boundary. It had
+/// no TS type at all before: the frontend built an anonymous object literal, so a
+/// renamed field here would have broken the share sheet silently at runtime.
+#[derive(Debug, Clone, Copy, serde::Deserialize, ts_rs::TS)]
+#[ts(export)]
 pub struct Anchor {
     pub x: f64,
     pub y: f64,
@@ -53,7 +58,7 @@ pub struct Anchor {
 }
 
 /// Shows the share sheet for `path`, anchored to the button that asked for it.
-pub fn share(window: &WebviewWindow, path: &Path, anchor: Anchor) -> Result<(), String> {
+pub fn share(window: &WebviewWindow, path: &Path, anchor: Anchor) -> Result<(), Payload> {
     let path = path.to_path_buf();
     // The closure below runs after this function has already returned, so a
     // problem it discovers cannot travel in the Err - it goes out as a notice.
@@ -127,7 +132,7 @@ pub fn print(
     landscape: bool,
     paper: &str,
     title: &str,
-) -> Result<(), String> {
+) -> Result<(), Payload> {
     let path = path.to_path_buf();
     let paper = paper.to_string();
     let title = title.to_string();
@@ -153,7 +158,7 @@ pub fn print(
             let ns_window: &NSWindow = unsafe { &*(ns_window as *const NSWindow) };
 
             let Some(image) = NSImage::initWithContentsOfFile(NSImage::alloc(), &NSString::from_str(&path.display().to_string())) else {
-                Problem::PrintUnreadable { path: &path }.notify(&app, Level::Error);
+                Problem::PrintUnreadable { path: path.clone() }.notify(&app, Level::Error);
                 return;
             };
 

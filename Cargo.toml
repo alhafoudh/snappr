@@ -1,0 +1,35 @@
+[workspace]
+members = ["crates/snappr-core", "crates/snappr-cli", "crates/xtask", "src-tauri"]
+resolver = "2"
+
+# One place for the versions both the app and the CLI depend on, so the shell and
+# the pipeline can never disagree about what libvips or serde they are built
+# against.
+[workspace.dependencies]
+rs-vips = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# "std" for `set_boxed_logger`, which is how the CLI installs its stderr logger.
+log = { version = "0.4", features = ["std"] }
+notify = "8"
+tempfile = "3"
+sha2 = "0.11"
+quick-xml = "0.42"
+regex = "1"
+toml = "1"
+etcetera = "0.11"
+# Generates the frontend's TypeScript from these very structs, so the wire cannot
+# drift. `cargo test` writes src/bindings/; nothing is hand-mirrored any more.
+ts-rs = { version = "12", features = ["serde-compat", "no-serde-warnings"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77.2"
+authors = ["Freevision s.r.o."]

@@ -1,7 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Flex, Grid } from "@radix-ui/themes";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { Menu, type MenuOptions } from "@tauri-apps/api/menu";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { confirm, open } from "@tauri-apps/plugin-dialog";
@@ -13,7 +11,8 @@ import { Stage } from "./components/Stage";
 import { Actions } from "./components/Actions";
 import { Filmstrip } from "./components/Filmstrip";
 import { OverlayPanel, PANEL_WIDTH, RAIL_WIDTH } from "./components/OverlayPanel";
-import type { Drag, Notice, Orientation, OverlayCard, Photo, View } from "./types";
+import { cmd, on, sentence } from "./ipc";
+import type { Anchor, Drag, Notice, Orientation, OverlayCard, Photo, View } from "./types";
 
 export default function App() {
   const {
@@ -49,11 +48,17 @@ export default function App() {
   const now = useNow();
 
   /**
-   * Whatever an invoke rejected with. Rust's `Err` strings are already the
-   * operator's half of the message - `src-tauri/src/problem.rs` is what
-   * guarantees it - so this is a level and a `String()`, not a translation.
+   * Whatever a command rejected with.
+   *
+   * A rejection now carries the catalogue's own sentence plus a code, so `sentence`
+   * hands back the operator's half and keeps anything uncatalogued - which is a
+   * bug, not a situation - from reaching the screen as a stringified exception.
+   * This used to be `String(error)` over a bare string.
    */
-  const fail = useCallback((error: unknown) => setProblem({ level: "error", text: String(error) }), []);
+  const fail = useCallback(
+    (error: unknown) => setProblem({ level: "error", text: sentence(error) }),
+    [],
+  );
 
   /**
    * Notices pushed from Rust rather than returned from a command, for an outcome
@@ -65,9 +70,7 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     let off: (() => void) | undefined;
-    listen<Notice>("notice", (event) => setProblem(event.payload)).then((stop) =>
-      cancelled ? stop() : (off = stop),
-    );
+    on.notice(setProblem).then((stop) => (cancelled ? stop() : (off = stop)));
     return () => {
       cancelled = true;
       off?.();
@@ -183,14 +186,17 @@ export default function App() {
       setProblem(null);
       try {
         if (kind === "print") {
-          await invoke("print_photo", { source: current.source });
+          await cmd.printPhoto(current.source);
         } else {
-          // The sheet is anchored to the button, so it needs to know where that is.
+          // The sheet is anchored to the button, so it needs to know where that
+          // is. `Anchor` is a generated type now, so a renamed field on the Rust
+          // side is an error here rather than a share sheet that opens in the
+          // wrong place.
           const box = shareButton.current?.getBoundingClientRect();
-          const anchor = box
+          const anchor: Anchor = box
             ? { x: box.left, y: box.top, width: box.width, height: box.height }
             : { x: window.innerWidth / 2, y: window.innerHeight / 2, width: 1, height: 1 };
-          await invoke("share_photo", { source: current.source, anchor });
+          await cmd.sharePhoto(current.source, anchor);
         }
       } catch (error) {
         fail(error);
@@ -401,7 +407,7 @@ export default function App() {
         text: "Reveal in Finder",
         enabled: !card.missing,
         action: () => {
-          invoke("reveal_overlay", { overlay: card.overlay }).catch(fail);
+          cmd.revealOverlay(card.overlay).catch(fail);
         },
       },
       ...(card.removable
@@ -423,7 +429,7 @@ export default function App() {
 
   const reveal = () => {
     if (!current) return;
-    invoke("reveal_photo", { source: current.source }).catch((error) => fail(error));
+    cmd.revealPhoto(current.source).catch((error) => fail(error));
   };
 
   // The bar and the strip span both columns; only the middle row is split. The

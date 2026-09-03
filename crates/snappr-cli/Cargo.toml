@@ -1,0 +1,20 @@
+[package]
+name = "snappr-cli"
+description = "The snappr command line: watch a folder, or overlay photos now"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+# Not `snappr`: macOS filesystems are case-insensitive by default, and the app's
+# binary is `Snappr`. Two targets whose names differ only in case would collide in
+# `target/debug`.
+[[bin]]
+name = "snappr-cli"
+path = "src/main.rs"
+
+[dependencies]
+snappr-core = { path = "../snappr-core" }
+clap = { version = "4", features = ["derive"] }
+log.workspace = true
+serde_json.workspace = true

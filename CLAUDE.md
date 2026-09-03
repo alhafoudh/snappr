@@ -30,8 +30,8 @@ already made untrue.
 | document | owns |
 |---|---|
 | `CLAUDE.md` | the pipeline, the print, and every invariant protecting the photo |
-| `docs/desktop-app.md` | the Rust shell, the React UI, the sidecar, settings, drops |
-| `docs/bundled-runtime.md` | the Ruby and libvips that ship inside `Snappr.app` |
+| `docs/desktop-app.md` | the shell, the React UI, the IPC, settings, drops |
+| `docs/bundled-runtime.md` | the libvips that ships inside `Snappr.app` |
 
 A fourth rule outranks all three: **prefer a comment at the site over a paragraph
 here.** Most of this codebase argues its own decisions where they live, with the
@@ -40,93 +40,125 @@ documents are for what spans files and therefore fits in none of them.
 
 ## Stack
 
-- Ruby 3.4.5, pinned by `mise.toml`
-- Zeitwerk autoloading for everything under `lib/`
-- libvips 8.18.4 via `ruby-vips`, driven through `image_processing`
-- librsvg 2.62.3 for the overlay, libheif for HEIC - both already inside libvips
+- Rust, one cargo workspace: `crates/snappr-core` is the pipeline,
+  `crates/snappr-cli` the command line, `src-tauri` the app, `crates/xtask` the
+  build tasks
+- libvips 8.18.4 via `rs-vips`, called directly
+- librsvg 2.62.3 for the overlay, libheif for HEIC - both linked inside libvips
+- `quick-xml` for the overlay rewrite, `notify` for the watch, `ts-rs` for the
+  frontend's types
 
-No Rails. Runtime gems are `image_processing`, `listen`, `ruby-vips`, `rexml`,
-`zeitwerk` and nothing else.
+**There is no Ruby anywhere.** The pipeline was Ruby until 2026-09-03: a child
+process on the far end of an NDJSON pipe, with a relocatable CRuby compiled from
+source to ship inside the app. Everything it did lives in `snappr-core` now, and
+the seven things that were implemented twice - the watcher, the candidate rule,
+the settle test, the defaults table, the message catalogue, the overlay-slot
+existence check and the derived-file cache key - are implemented once.
+
+The port is pixel-exact and was checked that way rather than assumed: 15 cases
+captured from the Ruby pipeline (both orientations, 16-bit, Display P3 at 300 dpi,
+EXIF-orientation-6, no overlay, the shipped sample, a moved overlay file) are
+reproduced byte for byte, layout integers and all. `crates/snappr-core/tests/golden.rs`
+is that comparison; it skips itself when `build/goldens` is absent.
 
 ## The desktop app
 
-The Tauri app lives at the repo root: `src/` is the React frontend, `src-tauri/`
-the Rust shell, and a Ruby child process does the image work. **It has its own
-document: `docs/desktop-app.md`.** That covers the sidecar protocol, the Radix UI,
-the preview tier, the settings file, printing and drops, and the message
-catalogue.
+The Tauri app lives at the repo root: `src/` is the React frontend and
+`src-tauri/` the shell around `snappr-core`. **It has its own document:
+`docs/desktop-app.md`.** That covers the IPC, the Radix UI, the preview tier, the
+settings file, printing and drops, and the message catalogue.
 
 Two things about it belong here, because they change what the pipeline may assume:
 
-- **The app never calls `Config.load`.** Its settings travel to Ruby in the
-  sidecar handshake, so `config/snappr.yml` is the CLI's config and nothing else
-  reads it.
+- **The app does not read the CLI's config.** Its settings live in
+  `settings.json` and reach the pipeline as a `PipelineConfig`;
+  `~/.config/snappr/config.toml` is the CLI's and nothing else looks at it. The
+  rule is unchanged - only the file moved - and the reason is that the UI rewrites
+  its settings on every toggle while the TOML is hand-edited.
 - **The app is stateful where the pipeline is not** - see the end of
   Architecture below.
 
-Run it with `npm run tauri dev` (Vite on a fixed port 5183), after
-`mise run runtime` has built the bundled Ruby and libvips into `build/`. What that
-builds, and why it is built rather than borrowed from Homebrew, is
-`docs/bundled-runtime.md`.
+Run it with `npm run tauri dev` (Vite on a fixed port 5183). A debug build links
+Homebrew's libvips if `cargo xtask libvips` has never run, so the app comes up on
+a fresh clone; a *release* build links the bundled one. That split, and why libvips
+is built rather than borrowed, is `docs/bundled-runtime.md`.
 
 ## Tooling
 
-`mise.toml` pins Ruby and is the entry point operators type. `bin/snappr` is the
-real executable, but reach it through mise so the toolchain activates and nobody
-has to remember `bundle exec`:
+`mise.toml` is the entry point operators type; `cargo` and `npm` do the work.
 
 ```
-mise run setup            bundle install
 mise run watch            watch the drop folder and overlay each photo that lands
 mise run overlay PATH     overlay the given photos now, then open them
-mise run test             unit tests
-mise run runtime          build the Ruby and libvips that ship inside Snappr.app
+mise run inspect PATH     what libvips makes of a file, as JSON
+mise run test             the whole suite, including the golden diff
+mise run test-live        the watcher tests that drive real fsevents
+mise run dev              the app, against Vite
+mise run app              build Snappr.app with the bundled libvips inside it
+mise run runtime          build that libvips, relocate its closure, prove it
 ```
 
-`mise run runtime` and the five `runtime-*` tasks behind it are
-`docs/bundled-runtime.md`. You need them before `npm run tauri dev`, and not at
-all for the CLI.
+There is no `setup` task: `cargo` fetches what it needs. `mise run runtime` and
+the three `runtime-*` tasks behind it are `docs/bundled-runtime.md`; you need them
+for `mise run app`, and not at all for `mise run dev` or the CLI.
 
-`SNAPPR_ROOT` comes from mise's `{{config_root}}`, so `Snappr::Config` resolves
-every path against the project root rather than the working directory. There is
-an `__dir__` fallback so `bin/snappr` still works when invoked directly.
+The CLI reads `~/.config/snappr/config.toml`, or `--config PATH`, or
+`$SNAPPR_CONFIG` - and **a missing file is a complete, working configuration**,
+because every key has a default. XDG rather than
+`~/Library/Application Support`, so it is where someone editing dotfiles looks and
+`XDG_CONFIG_HOME` is honoured.
+
+```toml
+background = "#ffffff"
+open_after = true
+
+[print]
+short_mm = 100
+long_mm = 148
+
+[overlay]
+landscape = "~/Designs/event-landscape.svg"
+portrait  = "~/Designs/event-portrait.svg"
+```
+
+A relative overlay path resolves against the config file's own directory, so it
+means the same thing whatever folder the CLI is run from.
 
 `mise run overlay` is the loop for iterating on the overlays - it takes paths
 straight off the command line, so you never have to AirDrop anything to see a
 change. Pass it one landscape and one portrait photo to check both variants at
-once - but note that the portrait slot in `config/snappr.yml` currently names a
-file that is not there, so a portrait photo comes out unbranded with a warning
-until that is pointed at a real SVG.
+once; with no config file at all both come out unbranded, which is a working
+configuration and not a fault.
 
 ## Architecture
 
 ```
 ~/Downloads/IMG_1234.heic
-      | listen gem: extension filter, self-output guard, stability check
+      | core::watcher: already_there, candidate filter, settle poll
       v
-  Overlay#call
-      |  new_from_file(src).autorot          -> width, height
-      |  Exif.read(image)                    -> camera, lens, exposure, taken_at
-      |  orientation_of(width, height)       -> :landscape | :portrait
-      |  crop_dimensions(w, h, print_ratio)  -> largest inscribed 148:100 or 100:148
-      |  config.overlay_svg(orientation)     -> the operator's SVG, or nil
-      |  OverlaySvg.render(svg, crop_w, crop_h)
-      |
-      |  OverlaySvg.photo_window(svg)         -> the #FF00FF window, as fractions
-      |                                          (FULL_FRAME when there is no SVG)
-      |  layout_for(...)                      -> canvas size, crop, placement
+  core::worker  (one thread, one queue - one photo at a time)
+      v
+  Overlay::process
+      |  new_from_file(src).autorot()        -> width, height
+      |  exif::read(&image)                  -> camera, lens, exposure, taken_at
+      |  Orientation::of(width, height)      -> Landscape | Portrait
+      |  crop_area(w, h, print_ratio)        -> largest inscribed 148:100 or 100:148
+      |  config.overlay(orientation)         -> the operator's SVG, or None
+      |  overlay_svg::photo_window(svg)      -> the #FF00FF window, as fractions
+      |                                         (FULL_FRAME when there is none)
+      |  layout_for(...)                     -> canvas size, crop, placement
+      |  overlay_svg::render(svg, canvas_w, canvas_h)
       |  icc_transform the overlay into the photo's colour space
       |
-      |  ImageProcessing::Vips
-      |    .crop(left, top, photo_w, photo_h)          object-fit: cover, no scaling
-      |    .embed(photo_left, photo_top, canvas_w, canvas_h, background)
-      |    .composite(overlay, over, north-west)       only when there is an overlay
-      |    .flatten                                    only when there is alpha to drop
-      |    .convert(png).saver(compression: 6)
+      |  extract_area(left, top, photo_w, photo_h)     object-fit: cover, no scaling
+      |  embed_with_opts(photo_left, photo_top, canvas_w, canvas_h, background)
+      |  composite2(overlay, Over)                     only when there is an overlay
+      |  flatten_with_opts(background)                 only when there is alpha to drop
+      |  pngsave_with_opts(compression: 6)
       v
 ~/Downloads/IMG_1234.tmp-<pid>.overlay.png   (renamed into place)
       v
-~/Downloads/IMG_1234.overlay.png  ->  system("open", ...)
+~/Downloads/IMG_1234.overlay.png  ->  the CLI opens it; the app draws it
 ```
 
 The photo is fitted to the overlay's window rather than the overlay being sized
@@ -147,9 +179,16 @@ shown as a broken cell.
 
 The app also derives three preview JPEGs per photo for the window to draw - the
 print itself is 10-25 MB and cannot be handed to a webview. They live in the app's
-own data directory, never beside the photo; `lib/snappr/preview.rb` is the whole
-of it, and "Previews never go in the drop folder" under Hard constraints is why.
-See `docs/desktop-app.md`.
+own data directory, never beside the photo; `crates/snappr-core/src/preview.rs` is
+the whole of it, and "Previews never go in the drop folder" under Hard constraints
+is why. See `docs/desktop-app.md`.
+
+**One photo at a time, and that is now explicit.** It used to be a side effect:
+the Ruby child accepted one request at a time, so the shell could spawn an
+unbounded thread per photo and they all queued on the pipe. `core::worker` is that
+queue, kept because a busy AirDrop session would otherwise composite four 12MP
+frames at once, each holding a 10-25 MB output plus its source - and memory is
+what gives out first, on the machine least able to afford it.
 
 ## Everything stays where it is
 
@@ -191,12 +230,13 @@ above and are not:
   unrecoverable. `Settings::load` in `src-tauri/src/settings.rs` says so at the
   point where the order matters.
 
-**Logs go to stderr, and that is load-bearing rather than a detail.** Ruby's
-stdout carries protocol frames to the shell and nothing else, so a single stray
-`puts` desynchronises the caller's parser. `Snappr.logger` is built on `$stderr`
-for exactly this reason (`lib/snappr.rb`), and `Server#run`'s comment states the
-invariant. Under the CLI that just means log output on the terminal; under the app
-the shell pumps the child's stderr into its own console.
+**Logs go to stderr, and the reason changed but the rule did not.** It used to be
+a protocol requirement: Ruby's stdout carried NDJSON frames to the shell, so one
+stray `puts` desynchronised the caller's parser. There is no protocol now, and it
+is still right - `snappr overlay --json` writes machine-readable output to stdout
+and `cargo xtask verify` parses it, so a log line there would break the build gate
+instead. The CLI's logger is in `crates/snappr-cli/src/main.rs`; the app's is
+`tauri-plugin-log`.
 
 ## Nothing is allowed to degrade the photo
 
@@ -209,7 +249,7 @@ lossless, but not lossless, and it cannot carry more than 8 bits. PNG is exactly
 lossless, keeps 16-bit, keeps the ICC profile, keeps the resolution tag, and
 encodes in about a third of the time of lossless HEIC.
 
-`overlay_test.rb` asserts the photo is **bit-identical to the source everywhere
+`golden.rs` asserts the photo is **bit-identical to the source everywhere
 the overlay is fully transparent**. That is the invariant to test, and note why it
 is phrased that way: the overlay is meant to draw *over* the photo, so pixels
 under artwork are supposed to change. An inset-border check was tried first and is
@@ -249,7 +289,7 @@ Verified byte-for-byte with Display P3, the space iPhones actually shoot in.
 **The overlay is converted into the photo's colour space before compositing.**
 librsvg renders in sRGB. If the photo is Display P3 and the overlay is composited
 as raw numbers, any colour in the branding is reinterpreted and comes out wrong:
-an sRGB brand red of (200, 30, 40) lands as P3 (184, 50, 49). `Overlay#overlay_for`
+an sRGB brand red of (200, 30, 40) lands as P3 (184, 50, 49). `Overlay::overlay_image`
 does an `icc_transform` from sRGB into the photo's embedded profile, falling back
 to compositing as-is (with a warning) if the profile is unusable. Today's branding
 is pure white and black, which are identical in both spaces, so this is currently
@@ -266,7 +306,7 @@ rendition anyway - this is a non-issue for this pipeline, not a compromise.
 ## Hard constraints
 
 **The self-output guard.** The output is written next to the input, in the folder
-being watched. `Watcher#candidate?` skips anything ending in the configured
+being watched. `watcher::is_candidate` skips anything ending in the configured
 `output_suffix`, case-insensitively, and the in-progress `*.tmp-<pid>.overlay.png`
 ends in that same suffix so one guard covers both.
 
@@ -280,45 +320,58 @@ forever - and it becomes load-bearing again the moment anyone adds `png` to
 **Previews never go in the drop folder**, and this one is not belt and braces -
 it is the sharper version of the guard above. The app derives three preview JPEGs
 per photo, and **`jpg` *is* a watched extension**. A preview sitting beside its
-original would therefore pass `candidate?`, be composited, produce previews of its
-own, and the pipeline would eat its own output forever. The overlay PNG gets away
-with living in the watched folder only because `png` is not watched; a JPEG would
-not. That is why `Preview.new` takes its destination as a **required argument with
-no default** that could quietly fall back to the drop folder, and why
-`Server#hello` uses `fetch("preview_dir")` rather than defaulting it. See the
-header of `lib/snappr/preview.rb`. Previews go to `app_data_dir()/previews`, which
-is also the one path `assetProtocol.scope` in `tauri.conf.json` allows the webview
-to read - the directory choice and the asset scope are a single decision, so
-moving one silently breaks the other.
+original would therefore pass `is_candidate`, be composited, produce previews of
+its own, and the pipeline would eat its own output forever. The overlay PNG gets
+away with living in the watched folder only because `png` is not watched; a JPEG
+would not. That is why `Preview::new` takes its destination as a **required
+argument with no default** that could quietly fall back to the drop folder. See
+the header of `crates/snappr-core/src/preview.rs`. Previews go to
+`app_data_dir()/previews`, which is also the one path `assetProtocol.scope` in
+`tauri.conf.json` allows the webview to read - the directory choice and the asset
+scope are a single decision, so moving one silently breaks the other.
 
-**Requiring `image_processing/vips` disables SVG loading.** Its `vips.rb` calls
-`Vips.block_untrusted(true)` at require time, and libvips marks `svgload` as an
-untrusted loader. The symptom is every render failing with
-`VipsForeignLoad: buffer is not in a known format`, which points nowhere near the
-cause. `lib/snappr.rb` requires the gem explicitly and then calls
-`Vips.block("VipsForeignLoadSvg", false)`, unblocking that one loader by name.
-Order matters - do this after the require, or the gem re-blocks it. Do not
-"simplify" it to `Vips.block_untrusted(false)`: guest photos are semi-trusted
-input and should keep the hardening; only our own committed SVG is exempt.
+**The SVG loader is unblocked by name, and the hardening around it is now opted
+into.** libvips marks `svgload` untrusted, and an image whose loader is blocked
+fails with `VipsForeignLoad: buffer is not in a known format` - which points
+nowhere near the cause. `core::vips::init` therefore calls
+`vips_block_untrusted_set(1)` and then `vips_operation_block_set` to exempt
+`VipsForeignLoadSvg`, in that order.
+
+Note the inversion. Under Ruby this hardening arrived *by accident*, because
+`image_processing/vips` called `block_untrusted(true)` at require time, and the
+code had to undo half of it. rs-vips blocks nothing, so an unthinking port would
+have silently dropped a security property nobody asked for and nobody would have
+missed. Do not "simplify" it away: guest photos arrive by AirDrop from whoever is
+standing at the kiosk and should keep the hardening; only our own SVG is exempt.
+`an_untrusted_loader_stays_blocked` in `vips_capabilities.rs` is what proves it is
+still on.
 
 **The crop keeps the source's resolution, so it must be the largest inscribed
 rectangle.** "Keep the dpi of the source photo" is the requirement; the way it is
 met is to pick the biggest rectangle of the target ratio that fits inside the
-photo, which makes `resize_to_fill`'s scale factor exactly 1. The result is a
-pure centre crop: no resampling, no upscaling, and libvips carries `xres`/`yres`
-through untouched. `Overlay#crop_dimensions` keeps one side whole and shortens
-the other, and `overlay_test.rb` asserts both that neither side ever grows and
-that one side is always kept whole - the second half is what stops someone
-"fixing" it into a fixed 300 dpi target.
+photo, which makes the scale factor exactly 1. The result is a pure centre crop:
+no resampling, no upscaling, and libvips carries `xres`/`yres` through untouched.
+`overlay::crop_area` keeps one side whole and shortens the other, and
+`crop_area_never_upscales_and_is_maximal` asserts both that neither side ever
+grows and that one side is always kept whole - the second half is what stops
+someone "fixing" it into a fixed 300 dpi target.
 
-**Read the dimensions after `autorot`, never before.** `ImageProcessing` also
-autorotates on load, so anything measured from the pre-rotation header is
-transposed on every portrait phone photo. That now decides more than the overlay
-size: it picks the orientation, and therefore which SVG is used and which way the
-photo is cropped. Get it wrong and a portrait photo is judged landscape, cropped
-to 148:100 and given the right-hand panel. `Overlay#dimensions` calls `.autorot`
-first for exactly this reason. libvips is lazy, so this costs a header read, not
-a decode.
+**`round()`, never a cast, in that arithmetic.** `crop_area(1200, 900, 1.48)` gives
+a height of 811; truncating gives 810, which moves the crop origin by a pixel and
+changes every dimension derived from it. Likewise the window's right edge is
+`round(x) + round(w)`, not `round(x + w)`, and `(window.width / window.height) *
+print_ratio` keeps its parenthesisation - reassociating it differs in the last bit
+and can flip a half-way rounding. None of that would fail loudly; it would move
+the seam. The golden diff is what guards it.
+
+**Read the dimensions after `autorot`, never before.** Anything measured from the
+pre-rotation header is transposed on every portrait phone photo. That decides more
+than the overlay size: it picks the orientation, and therefore which SVG is used
+and which way the photo is cropped. Get it wrong and a portrait photo is judged
+landscape, cropped to 148:100 and given the right-hand panel. `Overlay::process`
+calls `.autorot()` before reading anything - dimensions, profile and EXIF alike,
+since `autorot` strips the orientation tag once it has applied it. libvips is
+lazy, so this costs a header read, not a decode.
 
 **The temp file needs a real image extension.** libvips picks its saver from the
 destination extension, so a `.tmp` temp path fails with
@@ -327,46 +380,46 @@ The temp name is `<stem>.tmp-<pid>.overlay.png`: `.png` so the saver works,
 `.overlay.png` so the watcher's guard skips it, `tmp-<pid>` so it is
 distinguishable and concurrent-safe.
 
-**A trap handler may not take a mutex.** `Listen::Listener#stop` synchronizes, so
-calling it from `trap("INT")` dies with
-`ThreadError: can't be called from trap context` on Ruby 3.4. The handler only
-flips a local flag; `Watcher#run` polls it and stops the listener outside the
-trap.
+**The watch must not recurse.** `RecursiveMode::NonRecursive`, and it is about CPU
+rather than tidiness. The measurements below were taken against the `listen` gem,
+which turned every fsevent into a *recursive* rescan of the changed directory, and
+they are the reason the constraint exists at all - `notify` does not rescan, but
+the watched directory is still `~/Downloads`: about 1.9k entries at the top level
+and about 19k files once its 89 subdirectories are walked, so a recursive watch
+would be asking for the same trouble by a different route.
 
-**`listen` must not be allowed to recurse.** `Listen.to` is passed
-`ignore: %r{/}`, and that is load-bearing for CPU, not tidiness. listen's macOS
-adapter turns every fsevent into a *recursive* rescan of the changed directory
-(`adapter/darwin.rb`, `_queue_change(:dir, dir, rel_path, recursive: true)`), and
-the watched directory is `~/Downloads`: about 1.9k entries at the top level, but
-about 19k files once its 89 subdirectories are walked. One unrelated file
-changing therefore cost 0.5-5s of CPU. Since snappr writes its own 10-25 MB
-`.overlay.png` into that same folder, the write storm from each photo pinned a
-core for **63 seconds** after the photo was already done - a kiosk that looks
-idle while eating 100% of a core. Measured per event: 0.517s before, 0.094s
-after; total CPU over a 5-minute window with one 12MP HEIC processed, 64.3s
-before, 12.1s after.
+What it cost when it did happen: one unrelated file changing was 0.5-5s of CPU,
+and since snappr writes its own 10-25 MB `.overlay.png` into that same folder, the
+write storm from each photo pinned a core for **63 seconds** after the photo was
+already done - a kiosk that looks idle while eating 100% of a core. Measured per
+event: 0.517s before, 0.094s after; total CPU over a 5-minute window with one 12MP
+HEIC processed, 64.3s before, 12.1s after.
 
-Note what does *not* help, because it reads like it should: neither the `only:`
-regex nor `Watcher#candidate?` prevents any of this. Both run *after* the scan,
-so they stop the compositing but not the directory walk - the self-output guard
-keeps snappr from re-processing its own PNG while the PNG still costs a full
-19k-file rescan. AirDrop only ever lands files at the top level of the drop
-folder, so ignoring the subdirectories loses nothing.
+AirDrop only ever lands files at the top level of the drop folder, so ignoring the
+subdirectories loses nothing.
 
-If this ever needs to go further, the next stop is dropping `listen` for a plain
-`Dir.children` scan on a timer: measured 0.0024s per scan of the same folder,
-40x cheaper again, and `wait_until_stable` already covers the partial-write
-problem that fsevents were buying.
+Note what does *not* help, because it reads like it should: the candidate filter
+prevents none of this. It runs *after* whatever the backend did, so it stops the
+compositing but not a directory walk - the self-output guard keeps snappr from
+re-processing its own PNG while the PNG would still cost a full rescan.
 
-**Both watchers act only on a photo being added.** The paragraph above is about
+If the watch ever needs to get cheaper still, the next stop is dropping fsevents
+for a plain directory listing on a timer: measured 0.0024s per scan of the same
+folder, and the settle poll already covers the partial-write problem that fsevents
+were buying.
+
+**The watcher acts only on a photo being added.** The paragraph above is about
 which *directories* are watched; this one is about which *changes* are acted on,
 and the reason is correctness rather than CPU. The drop folder is the operator's
 real `~/Downloads`, so nearly everything that happens in it - a file being written
 to, a chmod, a Finder tag, a deletion - has nothing to do with snappr, and acting
 on any of it means acting on the operator's unrelated business.
 
-The app's watcher got this wrong twice, in opposite directions, and both are worth
-knowing because neither looks wrong.
+There is **one watcher** now, in `crates/snappr-core/src/watcher.rs`, used by both
+the app and the CLI. There were two, and the Ruby one reached the same answer by a
+different route: `listen` diffed directory snapshots, so `added` already meant
+what `admit` below decides. The app's got it wrong twice, in opposite directions,
+and both are worth knowing because neither looks wrong.
 
 **First: it acted on everything.** It never looked at the event at all, so a
 *deletion* was fed through the same path as an arrival, and nothing could tell
@@ -463,29 +516,29 @@ point, not branding, which is why it lives in `sample/` and not in `share/`.
 Giving the branding 2/5 of the frame and the photo 3/5 splits along the frame's
 **long axis**, which is why portrait wants a bottom band rather than a right-hand
 strip: 2/5 of a 100mm width is only about 40mm, and artwork shrinks badly in it.
-That is design advice for whoever draws one, not something Ruby knows.
+That is design advice for whoever draws one, not something the code knows.
 
 **A `None` slot means no overlay at all.** The photo is still cropped to the
 print ratio, but nothing is composited over it: `Overlay::FULL_FRAME` stands in
 for the window, so the canvas comes out equal to the crop, the photo lands at
 (0, 0), and the seam margin is 0. The output is then bit-identical to the source
 across the *whole* frame rather than only where the overlay is clear -
-`overlay_test.rb` asserts exactly that.
+`golden.rs` asserts exactly that.
 
 **The sample is a watermark, and its marker covers the whole frame.** So it takes
 the same full-frame-window path, with one difference: an SVG *is* being
 composited, so the seam margin applies and the canvas comes out 4px smaller on
 each axis than the plain crop. The photo still fills the entire print and the
-wordmark sits on top of it, over about 1% of the pixels. `overlay_svg_test.rb`
+wordmark sits on top of it, over about 1% of the pixels. `overlay_svg.rs`'s tests
 pins the window at exactly `{0, 0, 1, 1}` - a redraw that inset it would silently
-turn every default print into a bordered one - and `overlay_test.rb` asserts the
+turn every default print into a bordered one - and `golden.rs` asserts the
 photo survives bit-for-bit under it, which with ~99% clear is the strongest form
 of that check anywhere in the suite.
 
 One trap in that path: **`flatten` is not a no-op on an image with no alpha.** It
 fails with `linear: vector must have 1 or 2 elements`, which points nowhere near
 the cause. Alpha is present only if the overlay brought it or the source carried
-it, so `Overlay#process` asks about precisely that before flattening.
+it, so `Overlay::process` asks about precisely that before flattening.
 
 **A slot whose file has been moved degrades to no overlay with a warning**, and
 does not raise. The warning travels in the result's `warnings` array, so the cell
@@ -508,24 +561,21 @@ Where the settings live and how they reach the pipeline:
   `Settings::normalise` derives the library an old file implies - the sample first,
   plus whatever either slot already pointed at - so an install from before the
   panel opens with its own overlay already in it and no migration code anywhere.
-- **`Overlay` never reaches Ruby.** `Overlay::resolve` turns it into a path or
-  nothing on the Rust side, so `lib/snappr` still sees exactly what it always saw
-  and needed no changes at all for the sample. It could not do the lookup itself
-  either: `SNAPPR_ROOT` is `Resources/snappr` in a bundle and the repo root in
-  development, and `sample/` sits *beside* the first but *inside* the second.
-- `pipeline_config(app)` emits `overlay_svg: { landscape, portrait }`, with an
-  explicit `null` for a slot that resolves to nothing. `Server#hello` merges the
-  frame over `Config::DEFAULTS`, whose overlay entries are nil - so absent and
-  null happen to be identical today, and the null is there because this is the
-  side that decides overlays and should say so outright. **Keep the Ruby default
-  nil**, or the two stop agreeing.
-- `set_overlay` pushes the change to the running child with `Sidecar::
-  reconfigure`, so no relaunch is needed - and it is **all** a card's toggles do.
-  A slot holds one value, so switching an overlay on is also what switches it off
-  wherever it was; there is no second command and no way for two cards to show lit
-  for one orientation. `remove_overlay` pushes too, because removing a card can
-  empty a slot. Photos already in the strip keep their output; the per-photo retry
-  button is how one gets regenerated.
+- **`Overlay` never reaches the pipeline.** `Overlay::resolve` turns it into a
+  path or nothing first, so `snappr-core` sees a path and needed no changes at all
+  for the sample. It could not do the lookup itself either: a bundle keeps
+  `sample/` *beside* its `Resources` and the repo keeps it *inside* the source
+  tree, and only the shell knows which layout it is in.
+- `pipeline_config(app)` builds a whole `PipelineConfig`, overlays resolved to
+  `Option<PathBuf>`. This used to be a JSON frame merged over a *second* defaults
+  table on the Ruby side, with a rule about keeping the two nils in agreement;
+  there is one defaults table now, so there is nothing to agree about.
+- `set_overlay` **only saves**. There is no push: `process` reads
+  `pipeline_config` when it queues a photo, so the next one uses the new slot by
+  construction. That is **all** a card's toggles do - a slot holds one value, so
+  switching an overlay on is also what switches it off wherever it was, and there
+  is no way for two cards to show lit for one orientation. Photos already in the
+  strip keep their output; the per-photo retry button is how one gets regenerated.
 - **The slot is the only setting whose on-disk shape has ever changed**, and
   `Settings::load` answers any parse failure by discarding the whole file - so a
   field that cannot read its own history costs the operator their watch folder and
@@ -544,13 +594,14 @@ Where the settings live and how they reach the pipeline:
   `tauri-build` copies it into `target/debug/` in development too, so
   `BaseDirectory::Resource` finds it in both modes and no fallback is needed.
 - **`share/` is test material, not branding**, and must never be listed in
-  `bundle.resources`. `config/snappr.yml` still points at it because that file is
-  the CLI's config and nothing else reads it - the app never calls `Config.load`.
+  `bundle.resources`. Nothing points at it any more except the tests: it held the
+  overlays the Ruby CLI's config named, and the CLI's config now ships with no
+  overlays at all.
 
-Adding that `resources` key was safe only because it does not create
-`Resources/snappr`, which is what `Runtime::detect` probes to choose the bundle
-layout. See the header of `runtime.rs`: that layout is still unwired and
-`in_bundle` has never run.
+`bundle.macOS.frameworks` is the other bundling key, and it carries the 45 dylibs
+of the libvips closure. That list is *generated* - `cargo xtask closure` writes
+`src-tauri/tauri.frameworks.json` from what it actually put in `build/vips`, and
+`mise run app` merges it with `--config`. See `docs/bundled-runtime.md`.
 
 **Draw them in whatever tool you like.** Figma, Illustrator and Inkscape exports
 all work unmodified. There are three rules:
@@ -563,25 +614,26 @@ all work unmodified. There are three rules:
 2. **Draw at the paper's aspect ratio** - 1.48:1 for landscape, 1:1.48 for
    portrait. The overlay is stretched to fill the frame, so one drawn at the wrong
    shape is silently distorted. `Overlay#warn_on_aspect_mismatch` logs a warning
-   naming the size to redraw at, and `overlay_svg_test.rb` asserts the files in
+   naming the size to redraw at, and `overlay_svg.rs`'s tests asserts the files in
    `share/` are within 1% of their print ratio.
 3. **Keep a `viewBox`**, or a `width` and `height` in absolute units. That is what
    `OverlaySvg` scales. Exporters emit one by default.
 
 Anything the artwork does not cover and the photo does not reach is filled with
-`background` from `config/snappr.yml`, white by default. A design with a margin
-around its window gets that margin in the background colour.
+`background`, white by default - `settings.json` for the app,
+`~/.config/snappr/config.toml` for the CLI. A design with a margin around its
+window gets that margin in the background colour.
 
 Artwork may overlap the window freely - the overlay composites *over* the photo,
 so a logo or a soft edge across the photo works as drawn.
 
 To rebrand, add SVGs to the overlay panel and light the orientations you want.
-Nothing in Ruby knows what they depict; Ruby owns exactly two numbers about
+Nothing in the pipeline knows what they depict; it owns exactly two numbers about
 layout, the paper's dimensions.
 
 ### Finding the window by colour, not by geometry
 
-`OverlaySvg.photo_window` renders the SVG and takes the bounding box of the
+`overlay_svg::photo_window` renders the SVG and takes the bounding box of the
 magenta pixels, returning it as fractions of the frame. It does not read the
 element's coordinates.
 
@@ -617,7 +669,7 @@ than the photo has.
 
 ### Never overwrite the authored viewBox
 
-`Snappr::OverlaySvg` sets the root `width`, `height` and `preserveAspectRatio`,
+`core::overlay_svg` sets the root `width`, `height` and `preserveAspectRatio`,
 and **preserves the `viewBox` exactly as authored**. The viewBox is what maps the
 artwork's own coordinate system onto the output, so setting width and height is
 all it takes to scale a whole design to any photo size.
@@ -673,10 +725,10 @@ Re-verify these if libvips is upgraded. They were established empirically.
   the photo is grown two pixels past the window".
 - Window shapes, measured from the files as they stand: `share/overlay-landscape
   .svg` marks 74.16% of the width by full height; `sample/overlay-landscape.svg`
-  marks the whole frame, and `overlay_svg_test.rb` pins it at exactly
+  marks the whole frame, and `overlay_svg.rs`'s tests pins it at exactly
   `{0, 0, 1, 1}`. Both mark it with a `<path>` under a transform, so geometry
   parsing would have needed path and transform support. **There is no portrait
-  file in `share/` any more**, though `config/snappr.yml` still names one - so
+  file in `share/` any more**, though `~/.config/snappr/config.toml` still names one - so
   the CLI prints portrait photos unbranded.
 - `icc_transform` keeps the alpha channel, and maps sRGB white to (255,255,255)
   in Display P3 - so achromatic branding is unaffected while coloured branding is
@@ -701,15 +753,22 @@ Re-verify these if libvips is upgraded. They were established empirically.
 - **EXIF tags come out of libvips as one annotated string per tag**, shaped
   `<raw> (<human>, <Type>, <n> components, <n> bytes)` - e.g. FNumber is
   `"1244236/699009 (f/1.8, Rational, 1 components, 8 bytes)"`. The human half is
-  the one worth showing. `Snappr::Exif::ANNOTATED` anchors on the tail rather
-  than stripping the last bracket, because ApertureValue's human half is itself
-  parenthesised (`"1.66 EV (f/1.8)"`) and a bracket-counting parse gets it wrong.
-  Values arrive as ASCII-8BIT and are transcoded and scrubbed: left alone, one
-  high byte in a lens name takes down `JSON.generate` in `Server#emit` and fails
-  a photo whose PNG is already written.
+  the one worth showing. `exif::clean` anchors on the tail rather than stripping
+  the last bracket, because ApertureValue's human half is itself parenthesised
+  (`"1.66 EV (f/1.8)"`) and a bracket-counting parse gets it wrong.
+- **A tag whose bytes are not valid UTF-8 is reported as absent**, and that is one
+  place the port lost something. Ruby read these as raw bytes and scrubbed them, so
+  such a tag arrived mangled but present; rs-vips' `get_string` yields an empty
+  string and keeps the image pointer private, so there is no way from here to read
+  the bytes instead. The cost is one field missing from the info line for a camera
+  that writes Latin-1. The reason Ruby *needed* the scrub is gone either way - it
+  was protecting `JSON.generate` from bytes a Rust `String` cannot hold. If a real
+  camera turns up in this state, read `exif-data` and parse the block directly.
 - libvips writes EXIF ASCII fields to the 7-bit spec, transliterating accents
   away. So a test fixture that goes through `jpegsave` cannot carry high bytes -
-  set them on an in-memory image instead, which is what `exif_test.rb` does.
+  set them on an in-memory image instead, which is what `exif.rs`'s tests do. And
+  `set_string` refuses an interior NUL, so the NUL-padding case is asserted against
+  the parse rather than through a file.
 - **libvips `heifsave` does not write resolution metadata**, so a HEIC written by
   vips reads back at the 1 px/mm default. That only affects test fixtures - real
   camera HEICs carry their own - which is why the HEIC tests assert dimensions and
@@ -726,16 +785,24 @@ Re-verify these if libvips is upgraded. They were established empirically.
 ## What the app is allowed to say
 
 **Every message exists in exactly two versions, declared together**: a plain
-sentence for the operator and a technical half for the console. The catalogues are
-`lib/snappr/problem.rb` and `src-tauri/src/problem.rs`, and nothing writes a
-user-facing string anywhere else. `problem_test.rb` asserts the rules against the
+sentence for the operator and a technical half for the console. **There is one
+catalogue**, `crates/snappr-core/src/problem.rs`, and nothing writes a user-facing
+string anywhere else. `tests/problem_rules.rs` asserts the rules against the whole
 table, so reword freely - the tests assert on **codes**, not wording.
 
-Raising is the pipeline's half of this, so two rules apply on the Ruby side:
-anything snappr did not raise itself (`Vips::Error`, `KeyError`, a coercion
-failure) never shows its own text - `Problem.plain` substitutes a catalogue
-sentence and keeps the original for the log - and the mapping is by exception
-class, never by matching on a message.
+There were two catalogues, one per language, with six problems stated twice in
+slightly different words and comments pointing at each other to keep them in step.
+The merge was safe for the same reason the split survived: `Problem::code` is
+stable across rewordings.
+
+One rule applies wherever a failure comes from outside snappr: a libvips error
+never shows its own text. It borrows `PhotoUnusable`'s sentence and keeps the
+original for the log, and the mapping is **by type, never by matching on a
+message**.
+
+Every fallible command now returns `Result<T, Payload>` - the operator's sentence
+*plus* the catalogue code - so the frontend can branch on the kind of failure. It
+used to be a bare string, which could only be printed.
 
 The four channels a message can travel on, which one each kind of problem belongs
 to, and why the class must never be prefixed onto the message, are in
@@ -744,46 +811,51 @@ to, and why the class must never be prefixed onto the message, are in
 ## Repo layout
 
 ```
-THE PIPELINE (this document)
-  bin/snappr                CLI entrypoint - note `serve` is the DEFAULT subcommand
-  lib/snappr.rb             Zeitwerk setup, the svgload unblock, Snappr.root/.config/.logger
-  lib/snappr/problem.rb     THE MESSAGE CATALOGUE: every message, both halves
-  lib/snappr/config.rb      config/snappr.yml, project-relative path resolution
-  lib/snappr/exif.rb        camera, lens and exposure off the source header, for the UI
-  lib/snappr/overlay_svg.rb renders an overlay at a pixel size, finds its #FF00FF window
-  lib/snappr/overlay.rb     orientation, window fit, colour-managed composite, PNG save
-  lib/snappr/preview.rb     the three display JPEGs - NEVER into the watched folder
-  lib/snappr/overlay_preview.rb  the overlay panel's card: the artwork, and where the
-                                 photo window landed. A check, not a decoration.
-  lib/snappr/server.rb      the NDJSON sidecar protocol; stdout is frames, stderr is log
-  lib/snappr/watcher.rb     drop folder via the listen gem, candidate? guard, stability check
-  lib/snappr/cli.rb         subcommand dispatch (Snappr::CLI)
-  config/snappr.yml         the CLI's config. The app never reads it.
+THE PIPELINE (this document) - crates/snappr-core/src/
+  lib.rs                    the module list, and human_size
+  vips.rs                   libvips init, the svgload unblock, the error-buffer rule
+  problem.rs                THE MESSAGE CATALOGUE: every message, both halves
+  config.rs                 PipelineConfig: THE defaults table, and the TOML loader
+  exif.rs                   camera, lens and exposure off the source header, for the UI
+  overlay_svg.rs            renders an overlay at a pixel size, finds its #FF00FF window
+  overlay.rs                orientation, window fit, colour-managed composite, PNG save
+  preview.rs                the three display JPEGs - NEVER into the watched folder
+  overlay_preview.rs        the overlay panel's card: the artwork, and where the
+                            photo window landed. A check, not a decoration.
+  key.rs                    the cache key for anything derived from a file
+  watcher.rs                THE watcher: already_there, refusal(), the settle poll
+  worker.rs                 one photo at a time
+  inspect.rs                what libvips makes of a file - the bundle gate's eyes
+  tests/golden.rs           the diff against the Ruby pipeline it replaced
+  tests/vips_capabilities.rs  "Verified mechanics" below, made executable
+
+THE COMMAND LINE
+  crates/snappr-cli/        watch, overlay PATH..., inspect PATH
 
 THE DESKTOP APP (docs/desktop-app.md)
   src/                      React frontend. No stylesheet, by design - Radix Themes only
+  src/bindings/             GENERATED from the Rust structs by `cargo test`
+  src/ipc.ts                the only file that names a command or an event
   src-tauri/src/lib.rs      commands, events, drops, the index's lifetime
-  src-tauri/src/sidecar.rs  spawns Ruby, owns the wire protocol
-  src-tauri/src/runtime.rs  dev vs bundle layout, the child's environment
-  src-tauri/src/watcher.rs  the app's own watch; refusal() is the candidate rule
   src-tauri/src/settings.rs settings.json, the hand-written Overlay Deserialize, and
                             the overlay library the panel shows
   src-tauri/src/overlays.rs the panel's cards and their PNGs - snappr's own files
   src-tauri/src/photo.rs    one record per photo, and the index that outlives the session
   src-tauri/src/mac.rs      the share sheet and the native print
-  src-tauri/src/problem.rs  the shell's half of the catalogue, same two-version rule
+  src-tauri/src/problem.rs  delivery of a catalogue message to the window
   src-tauri/Info.plist      CFBundleDocumentTypes - why Dock drops work at all
 
-THE BUNDLED RUNTIME (docs/bundled-runtime.md)
-  bin/build-*               Ruby, libvips, its closure, the gems. Output goes to build/
-  bin/verify-bundle         the gate: nothing may come from Homebrew
-  mise.toml                 pins Ruby, and the entry point operators type
+THE BUNDLED LIBVIPS (docs/bundled-runtime.md)
+  crates/xtask/             libvips from source, its dylib closure, and the gate
+  src-tauri/build.rs        the two LC_RPATH entries that find it at runtime
+  crates/snappr-core/build.rs  which libvips is linked, per profile
+  mise.toml                 the entry points operators type
 
 OVERLAYS
   sample/overlay-landscape.svg  the ONE overlay that ships - the landscape default,
                                 and the only entry in bundle.resources
-  share/*.svg                   overlays for the CLI and for testing - NOT shipped,
-                                and never in bundle.resources
+  share/*.svg                   overlays for testing - NOT shipped, and never in
+                                bundle.resources
   share/*.orig.svg              the original hand-written overlays, whose geometry is
                                 percentages inside an absolute viewBox. Kept as a
                                 second dialect to render against - see "Never
@@ -792,34 +864,38 @@ OVERLAYS
   test/fixtures/                the same design in several SVG dialects
 ```
 
-Keep the decision logic in Ruby and the geometry in the SVGs. `Snappr::OverlaySvg`
-should stay a root-attribute rewrite; if you find yourself computing panel widths
-or positions in Ruby, the SVG is not being scaled properly. Ruby owns exactly two
-numbers about layout - the paper's two dimensions, in `config/snappr.yml`.
+Keep the decision logic in the pipeline and the geometry in the SVGs.
+`core::overlay_svg` should stay a root-attribute rewrite; if you find yourself
+computing panel widths or positions in Rust, the SVG is not being scaled properly.
+The pipeline owns exactly two numbers about layout - the paper's two dimensions.
 
 ## Working notes
 
-- AirDrop writes into `~/Downloads` non-atomically. `Watcher#wait_until_stable`
-  waits for size and mtime to stop changing (two matching reads 0.3s apart,
-  giving up after 30s) before compositing. `.download`, `.part` and
-  `.crdownload` names are ignored outright.
-- An in-memory in-flight `Set`, guarded by a mutex, keeps the same photo from
-  being composited twice over. This was originally about `listen`'s burst of
-  modify events for one arriving file; since only `added` is acted on that burst
-  is gone, and what is left is the same path being announced as added again -
-  created, removed, created - while the first `handle` is still inside its
-  30-second `wait_until_stable`.
-- One bad photo must not take the daemon down. `Watcher#handle` logs and moves
-  on. There is no retry and no reject folder: the original is still sitting in
-  `~/Downloads`, so `mise run overlay` on it is the retry.
+- AirDrop writes into `~/Downloads` non-atomically. The watcher's poll waits for
+  size and mtime to stop changing (two matching reads 0.3s apart, giving up after
+  30s) before the photo is composited. `.download`, `.part` and `.crdownload`
+  names are ignored outright.
+- Two things stop a photo being composited twice: `arriving` in the watcher, so
+  the same path announced twice is watched once, and the index's `Processing |
+  Done` early return in `process`. The Ruby in-flight `Set` was a third; it is
+  gone with the second watcher.
+- One bad photo must not take the app or the daemon down. Both log and move on.
+  There is no retry and no reject folder: the original is still sitting in
+  `~/Downloads`, so `mise run overlay` on it is the retry, and in the app the
+  per-photo button is.
 - Only one `watch` should run at a time, but nothing enforces it, because two
   watchers doing idempotent overwrites of the same output is harmless. What is
-  not harmless is an editor-launched watcher running stale code across a fix, so
-  check for a stray process before concluding a change did not work.
+  not harmless is a stale binary running across a fix, so check for a stray
+  process before concluding a change did not work.
 - Outputs are large: about 10 MB per 12MP photo, and 25 MB if the source was a
   10-bit HEIC. That is the price of lossless and it is the right trade for a
   kiosk, but `~/Downloads` will grow fast over an event. snappr never deletes
   anything, so clearing up is a manual job.
-- `rexml` is a bundled gem from Ruby 3.4 on, so it must be declared in the
-  `Gemfile`. It resolves fine outside bundler and then vanishes under
-  `bundle exec`, which makes the failure look like a Zeitwerk problem.
+- **libvips caches operations, and it can surprise a test.** `black(4, 4)` called
+  twice with identical arguments hands back *the same image*, so metadata set on
+  one turns up on the other. `exif.rs`'s tests each build their image at a size no
+  other test uses, and say why.
+- **libvips accumulates error text and never clears it on read.** rs-vips appends
+  the whole buffer to every error, so without `vips::clear_errors` a failure's
+  console half quotes unrelated earlier failures. Seen for real: an ICC assertion
+  came back reporting a different test's "buffer is not in a known format".

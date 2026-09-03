@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 
+import { cmd, on } from "./ipc";
 import type { Orientation, Overlay, OverlayCard, Photo, RuntimeStatus, Settings } from "./types";
 
 /**
@@ -51,11 +50,11 @@ export function usePhotos() {
       // listen() resolves on a microtask, so fetching first leaves a window in
       // which an event fires and is lost.
       keep(
-        await listen<Photo>("photo", (event) => {
-          merge(event.payload);
+        await on.photo((photo) => {
+          merge(photo);
           // Follow arrivals, so a photo that has just been AirDropped shows itself
           // without the operator touching anything.
-          if (event.payload.status === "processing") setSelected(event.payload.source);
+          if (photo.status === "processing") setSelected(photo.source);
         }),
       );
       // Clearing is a removal, so it cannot travel on the `photo` event: there is
@@ -63,23 +62,23 @@ export function usePhotos() {
       // forgets them, which keeps the rule that the shell is the only thing that
       // decides what the filmstrip contains.
       keep(
-        await listen<string[]>("cleared", (event) => {
-          const gone = new Set(event.payload);
+        await on.cleared((sources) => {
+          const gone = new Set(sources);
           setPhotos((current) => current.filter((photo) => !gone.has(photo.source)));
         }),
       );
-      keep(await listen<RuntimeStatus>("runtime", (event) => setRuntime(event.payload)));
-      keep(await listen<OverlayCard[]>("overlays", (event) => setOverlays(event.payload)));
+      keep(await on.runtime(setRuntime));
+      keep(await on.overlays(setOverlays));
 
-      // Then pull. The sidecar becomes ready about a second after launch, which is
-      // usually before this component has mounted at all, and Tauri does not replay
-      // events - so without this read the UI would sit on "starting..." forever.
+      // Then pull. The pipeline is ready within a millisecond of launch, which is
+      // long before this component has mounted, and Tauri does not replay events -
+      // so without this read the UI would sit on "getting ready" forever.
       const [loaded, current, status, remembered, cards] = await Promise.all([
-        invoke<Photo[]>("list_photos"),
-        invoke<Settings>("get_settings"),
-        invoke<RuntimeStatus>("runtime_status"),
-        invoke<string | null>("selected_photo"),
-        invoke<OverlayCard[]>("list_overlays"),
+        cmd.listPhotos(),
+        cmd.getSettings(),
+        cmd.runtimeStatus(),
+        cmd.selectedPhoto(),
+        cmd.listOverlays(),
       ]);
       if (cancelled) return;
 
@@ -117,7 +116,7 @@ export function usePhotos() {
   // actually changes.
   useEffect(() => {
     if (selected === null) return;
-    invoke("set_selected", { source: selected }).catch((error) => {
+    cmd.setSelected(selected).catch((error) => {
       // Losing the selection across a restart is not worth interrupting a print for.
       console.error(error);
     });
@@ -126,15 +125,15 @@ export function usePhotos() {
   // Both clears report failure by throwing - the caller shows it - because unlike
   // processing there is no photo record left to carry an error back on.
   const clearPhoto = useCallback(async (source: string) => {
-    await invoke("clear_photo", { source });
+    await cmd.clearPhoto(source);
   }, []);
 
   const clearAllPhotos = useCallback(async () => {
-    await invoke<number>("clear_all_photos");
+    await cmd.clearAllPhotos();
   }, []);
 
   const reprocess = useCallback((source: string) => {
-    invoke("reprocess", { source }).catch(() => {
+    cmd.reprocess(source).catch(() => {
       /* the failure comes back as a photo event, so there is nothing to do here */
     });
   }, []);
@@ -143,46 +142,46 @@ export function usePhotos() {
   // had no catch anywhere for a while, so "that is not a folder" and any
   // settings-save failure were lost as unhandled rejections.
   const changeWatchDir = useCallback(async (dir: string) => {
-    setSettings(await invoke<Settings>("set_watch_dir", { dir }));
+    setSettings(await cmd.setWatchDir(dir));
   }, []);
 
-  // One of the panel's overlays, or nothing - both are real settings. Rust
-  // re-handshakes the sidecar, so the next photo uses it; the ones already in the
-  // strip keep the output they have.
+  // One of the panel's overlays, or nothing - both are real settings. The next
+  // photo reads the slots as it is queued, so it uses this; the ones already in
+  // the strip keep the output they have.
   //
   // Nothing here has to clear the overlay off whatever card had it: a slot holds
   // one value, so setting it is the whole of switching it over. The `overlays`
   // event that follows carries the new toggle states for every card.
   const changeOverlay = useCallback(async (orientation: Orientation, choice: Overlay) => {
-    setSettings(await invoke<Settings>("set_overlay", { orientation, choice }));
+    setSettings(await cmd.setOverlay(orientation, choice));
   }, []);
 
   // Adding does not switch anything on - the card arrives with both toggles dark.
-  // The rendered picture follows on the `overlays` event whenever Ruby gets to it.
+  // The rendered picture follows on the `overlays` event once the worker gets to it.
   const addOverlay = useCallback(async (path: string) => {
-    setSettings(await invoke<Settings>("add_overlay", { path }));
+    setSettings(await cmd.addOverlay(path));
   }, []);
 
   // Removes the card and empties any slot that used it. Deletes nothing the
   // operator can see: the SVG is theirs and stays where it is.
   const removeOverlay = useCallback(async (overlay: Overlay) => {
-    setSettings(await invoke<Settings>("remove_overlay", { overlay }));
+    setSettings(await cmd.removeOverlay(overlay));
   }, []);
 
   const setPanelCollapsed = useCallback(async (collapsed: boolean) => {
-    setSettings(await invoke<Settings>("set_panel_collapsed", { collapsed }));
+    setSettings(await cmd.setPanelCollapsed(collapsed));
   }, []);
 
   const setWatching = useCallback(async (enabled: boolean) => {
     try {
-      setSettings(await invoke<Settings>("set_watching", { enabled }));
+      setSettings(await cmd.setWatching(enabled));
     } catch (error) {
       // The shell has already put the setting back to what it could actually
       // do, so re-read it and let the toggle show that rather than the wish -
       // and only then rethrow, so the caller can say why. This used to stop at
       // console.error, which left the toggle snapping back with no explanation
       // anywhere on screen.
-      setSettings(await invoke<Settings>("get_settings"));
+      setSettings(await cmd.getSettings());
       throw error;
     }
   }, []);
