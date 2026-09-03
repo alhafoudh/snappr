@@ -212,6 +212,14 @@ export function usePhotos() {
     await cmd.clearAllPhotos();
   }, []);
 
+  // Throws on failure like the clears above, rather than swallowing like
+  // `reprocess`: nothing else is coming to report it, since the updated record is
+  // the success path. The record comes back on the `photo` event, so there is no
+  // local state to keep in step here.
+  const setPrinted = useCallback(async (source: string, printed: boolean) => {
+    await cmd.setPhotoPrinted(source, printed);
+  }, []);
+
   const reprocess = useCallback((source: string) => {
     cmd.reprocess(source).catch(() => {
       /* the failure comes back as a photo event, so there is nothing to do here */
@@ -275,6 +283,7 @@ export function usePhotos() {
     unseen,
     setSelected,
     reprocess,
+    setPrinted,
     clearPhoto,
     clearAllPhotos,
     changeWatchDir,

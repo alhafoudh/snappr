@@ -354,6 +354,21 @@ Anything discovered *after* the command returned - an unreadable PNG, a printer
 with no paper of the right size - goes out as a `notice`, because the closure runs
 after the `Ok`. That is the only place notices come from.
 
+**A photo is marked printed when the dialog opens, not when it is confirmed.**
+`print_photo` sets `Photo.printed_at` after `mac::print` returns, and `mac::print`
+has only dispatched the sheet by then - so cancelling it still leaves the cell
+carrying its printer glyph. macOS *can* tell the two apart: the sheet is run with
+`runOperationModalForWindow:delegate:didRunSelector:contextInfo:`, and that
+delegate-and-selector pair, passed `None` here, is exactly the callback carrying
+`didRun: BOOL`. Wiring an Objective-C delegate class for it was judged not worth
+the cost, and the cell's **Mark as Not Printed** is the correction - a cancelled
+print is the ordinary reason to reach for it.
+
+The mark is shell bookkeeping and never reaches the pipeline. It survives a
+relaunch in `index.json`, and it survives a **reprocess**: `process` carries
+`printed_at` onto the fresh record alongside `added_at`, because paper came out of
+the printer and running the overlay again does not take it back.
+
 ## Drops
 
 **Window drops**: Tauri owns them (`dragDropEnabled` is on), so the webview never
@@ -512,6 +527,33 @@ Two things that look like they could be simplified and cannot:
   the checked styling never renders. It fails silently: the selected cell simply
   looks idle, which reads as "Radix selection is too subtle" rather than as a
   bug. The Tooltip goes inside the Item.
+
+**A cell is three rows, and what goes in which is not arbitrary.** The thumbnail,
+the filename, then a **facts row** of glyphs: the orientation the photo was
+cropped to, and a printer when it has already been printed.
+
+The rule is what each row answers. The frame holds the picture and **exactly one
+mark - the red or amber dot meaning something is wrong with this photo**, which is
+the one thing worth interrupting the picture for. The facts row holds what is
+merely true about it. The unseen dot sits with the filename instead, because a
+photo nobody has looked at yet is a fact about the file, which is what the name
+is.
+
+Two things about that row that look incidental and are not:
+
+- **It is a fixed 16px, whether or not it has anything in it.** A queued photo has
+  no orientation yet and most photos have never been printed, so a row that sized
+  to its content would leave those cells shorter and their filenames out of line
+  with their neighbours'. The wobble is only visible on a mixed strip, which is
+  every strip at an event.
+- **Glyphs, not words.** A 132px cell has room for the name or for "Landscape",
+  not both, and the name is what the operator picks a cell by. The words live in
+  each glyph's `aria-label` and on the info line under the big photo.
+
+The filmstrip's grid row is **154px** to pay for the row - 14px more than the 140
+it was. `FRAME_HEIGHT` stays 84px, so the strip gained a line rather than bigger
+thumbnails, and the middle row being `1fr` means the 14px comes off the Stage
+rather than out of the window.
 
 **The keyboard map**, all of it in one `window` keydown handler in `App.tsx`:
 
@@ -674,8 +716,8 @@ times. The `<time>` element inside it carries no `title` of its own: a native
 tooltip underneath a Radix one races it and wins.
 
 **The line names the orientation beside the pixel count**, as `▭ Landscape 4032 x
-2724 px`, and the filmstrip cell carries the same glyph in the corner the status
-dot does not use. It is `Photo.orientation`, which is geometric and measured after
+2724 px`, and the filmstrip cell carries the same glyph on its facts row. It is
+`Photo.orientation`, which is geometric and measured after
 `autorot` rather than the EXIF `Orientation` tag - so it is the answer that
 actually picked the crop and the overlay, which is why it is printed rather than
 derived from the two numbers next to it. The cell gets the glyph without the word:
@@ -796,6 +838,7 @@ Each is argued at its own site; this is an index, not the argument.
 | `StateFlags::all()` on the window-state plugin | restores hidden windows and decorations too |
 | dropping `MAXIMIZED`/`FULLSCREEN` from those flags | a dragged-to-fill window reopens small, at the right position |
 | making `Photo::exif` non-`Option` | drops the whole session on the first launch after an update |
+| dropping `#[serde(default)]` from `Photo::printed_at` | the same, and it silently retypes the field as required in `src/bindings/Photo.ts` |
 | dropping `Stored::Legacy` | the same, for indexes already on disk |
 | `blocking_show` for the refusal alert | freezes the window - it runs on the event thread |
 | doing image work in a command body | they are synchronous, so that is the event thread |

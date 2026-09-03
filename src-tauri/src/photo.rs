@@ -93,6 +93,22 @@ pub struct Photo {
     pub error: Option<String>,
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// When the operator last sent this photo to the printer, in Unix seconds, or
+    /// `None` if they never have. Set when the print dialog is *opened*, not when
+    /// it is confirmed - `print_photo` says why, and the cell's context menu is
+    /// the correction for a print that was then cancelled.
+    ///
+    /// `#[serde(default)]` for the same reason as `exif` above, and for a second
+    /// one: **both serde attributes together are what make this optional in
+    /// TypeScript.** `#[ts(type = ...)]` overrides the field's type, and ts-rs
+    /// skips the struct's `optional_fields` for any field that does
+    /// (`ts-rs-macros/src/optional.rs`), falling back to "optional if it may be
+    /// omitted *and* has a default". `bytes` above has only the first half, which
+    /// is why it is typed as required despite being an `Option`. Dropping the
+    /// `default` here would silently do the same to this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number")]
+    pub printed_at: Option<u64>,
 }
 
 fn now() -> u64 {
@@ -124,6 +140,7 @@ impl Photo {
             exif: None,
             error: None,
             warnings: Vec::new(),
+            printed_at: None,
         }
     }
 
@@ -155,6 +172,15 @@ impl Photo {
     pub fn fail(&mut self, error: Payload) {
         self.status = Status::Failed;
         self.error = Some(error.message);
+    }
+
+    /// Sets or clears the print mark.
+    ///
+    /// The timestamp is when it was *marked*, which for a print made through the
+    /// app is when the dialog opened rather than when paper came out. Nothing
+    /// downstream reads it as anything finer than "this one has been printed".
+    pub fn printed(&mut self, printed: bool) {
+        self.printed_at = printed.then(now);
     }
 
     /// The files this record owns outright, and which therefore go when it does.
@@ -331,5 +357,56 @@ impl Index {
         let photo = self.photos.iter_mut().find(|p| p.source == source)?;
         change(photo);
         Some(photo.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A record written before `printed_at` existed must still load.
+    ///
+    /// This is the failure `Index::load` turns into a lost session: it answers any
+    /// parse error by falling back to `default()`, so one field that cannot read
+    /// its own history costs the operator the whole filmstrip on the first launch
+    /// after an update. `Photo::exif` carries the same guarantee for the same
+    /// reason.
+    ///
+    /// Deserialized directly rather than through `Index::load`, which needs an
+    /// `AppHandle` and a real data directory.
+    #[test]
+    fn a_record_from_before_the_print_mark_still_loads() {
+        let legacy = r#"{
+            "source": "/Users/someone/Downloads/IMG_1234.heic",
+            "name": "IMG_1234.heic",
+            "status": "done",
+            "added_at": 1772534400,
+            "warnings": []
+        }"#;
+
+        let photo: Photo = serde_json::from_str(legacy).expect("an older record must still load");
+        assert_eq!(photo.printed_at, None);
+        assert_eq!(photo.status, Status::Done);
+    }
+
+    /// And the mark round-trips, so a printed photo is still printed after a
+    /// relaunch.
+    #[test]
+    fn the_print_mark_survives_a_round_trip() {
+        let mut photo = Photo::queued(PathBuf::from("/Users/someone/Downloads/IMG_1234.heic"));
+        assert_eq!(photo.printed_at, None);
+
+        photo.printed(true);
+        let at = photo.printed_at.expect("marking must set a timestamp");
+
+        let raw = serde_json::to_string(&photo).unwrap();
+        let back: Photo = serde_json::from_str(&raw).unwrap();
+        assert_eq!(back.printed_at, Some(at));
+
+        // Clearing it drops the key rather than writing a null, which is what the
+        // `skip_serializing_if` is there for.
+        photo.printed(false);
+        assert_eq!(photo.printed_at, None);
+        assert!(!serde_json::to_string(&photo).unwrap().contains("printed_at"));
     }
 }

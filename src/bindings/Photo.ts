@@ -36,4 +36,20 @@ bytes: number,
  * `Index::load` drops the operator's whole session on the first launch after an
  * update.
  */
-exif?: Exif, error?: string, warnings: Array<string>, };
+exif?: Exif, error?: string, warnings: Array<string>, 
+/**
+ * When the operator last sent this photo to the printer, in Unix seconds, or
+ * `None` if they never have. Set when the print dialog is *opened*, not when
+ * it is confirmed - `print_photo` says why, and the cell's context menu is
+ * the correction for a print that was then cancelled.
+ *
+ * `#[serde(default)]` for the same reason as `exif` above, and for a second
+ * one: **both serde attributes together are what make this optional in
+ * TypeScript.** `#[ts(type = ...)]` overrides the field's type, and ts-rs
+ * skips the struct's `optional_fields` for any field that does
+ * (`ts-rs-macros/src/optional.rs`), falling back to "optional if it may be
+ * omitted *and* has a default". `bytes` above has only the first half, which
+ * is why it is typed as required despite being an `Option`. Dropping the
+ * `default` here would silently do the same to this field.
+ */
+printed_at?: number, };

@@ -24,6 +24,7 @@ export default function App() {
     unseen,
     setSelected,
     reprocess,
+    setPrinted,
     clearPhoto,
     clearAllPhotos,
     changeWatchDir,
@@ -306,6 +307,21 @@ export default function App() {
     [clearPhoto],
   );
 
+  // The mark is set by printing; this is the correction. Most often for a print
+  // dialog that was opened and then cancelled, which still marks the photo - see
+  // `print_photo` on the Rust side for why it is not worth telling those apart.
+  const markPrinted = useCallback(
+    async (photo: Photo, printed: boolean) => {
+      setProblem(null);
+      try {
+        await setPrinted(photo.source, printed);
+      } catch (error) {
+        fail(error);
+      }
+    },
+    [setPrinted],
+  );
+
   // Clearing one cell asks nothing: it is undone by dropping the photo back on the
   // window. Clearing the strip at an event throws away the whole session's worth of
   // cells at once, so that one asks first. Neither deletes anything on disk, and
@@ -343,6 +359,19 @@ export default function App() {
     event.stopPropagation();
     setSelected(photo.source);
     void popup([
+      // Absent rather than disabled for a photo with no print to speak of, the
+      // way the overlay card's menu leaves Remove off the sample: a greyed-out
+      // item invites a click that can never work.
+      ...(photo.status === "done"
+        ? [
+            {
+              id: "printed",
+              text: photo.printed_at ? "Mark as Not Printed" : "Mark as Printed",
+              action: () => void markPrinted(photo, !photo.printed_at),
+            },
+            { item: "Separator" as const },
+          ]
+        : []),
       { id: "clear", text: "Clear", action: () => void clearOne(photo) },
       { item: "Separator" },
       clearAllItem(),
@@ -466,9 +495,15 @@ export default function App() {
   // overlay panel belongs beside the *photo* - it is what will be drawn over it -
   // while the strip stays full width so the zeroth cell sits at the window's edge
   // and the photos run the whole way across.
+  //
+  // The strip's row is 154px rather than the 140 it was: the cell grew a facts
+  // row under its filename, and the 14px is what pays for it. The thumbnail is
+  // unchanged - `FRAME_HEIGHT` is still 84px - so the strip has gained a line
+  // rather than bigger pictures. The middle row is `1fr`, so the 14px comes off
+  // the Stage and the window does not need to be any taller.
   return (
     <Grid
-      rows={`${TOOLBAR_HEIGHT} minmax(0, 1fr) 140px`}
+      rows={`${TOOLBAR_HEIGHT} minmax(0, 1fr) 154px`}
       columns={`${(settings?.overlays_collapsed ?? false) ? RAIL_WIDTH : PANEL_WIDTH} minmax(0, 1fr)`}
       height="100vh"
     >

@@ -119,6 +119,30 @@ fn publish(app: &AppHandle, photo: &Photo) {
     let _ = app.emit("photo", photo);
 }
 
+/// Sets or clears a photo's print mark and publishes the record.
+///
+/// Both ways of marking go through here, so the index write and the cell on screen
+/// cannot disagree about which photos have been printed.
+fn set_printed(app: &AppHandle, source: &Path, printed: bool) -> Result<(), Payload> {
+    // One statement, so the index guard is dropped at the `;` - `publish` takes the
+    // same lock. Binding this with `if let` instead holds the guard across the body
+    // and deadlocks, which is why `reprocess` below is written the same way.
+    let updated = app
+        .state::<AppState>()
+        .index
+        .lock()
+        .unwrap()
+        .update(source, |photo| photo.printed(printed));
+
+    match updated {
+        Some(photo) => {
+            publish(app, &photo);
+            Ok(())
+        }
+        None => Err(Problem::PhotoForgotten { path: source.to_path_buf() }.say()),
+    }
+}
+
 /// Sends one photo through the pipeline and publishes the outcome.
 ///
 /// Called from a thread that is not the main one, and the composite itself is
@@ -132,21 +156,27 @@ fn process(app: AppHandle, source: PathBuf) {
     // keeps its arrival time so it neither moves along the strip nor restarts its
     // "added N minutes ago" label. Whatever previews that record owned are the ones
     // this run supersedes - see discard_superseded.
-    let (known_added_at, superseded) = {
+    //
+    // The print mark is carried over for the same reason and one of its own: paper
+    // came out of the printer, and running the overlay again does not take it back.
+    // Without this, the record below is a fresh one and a retry silently un-prints
+    // a photo. An operator who means the other thing has the cell's menu item.
+    let (known, superseded) = {
         let index = state.index.lock().unwrap();
         match index.get(&source) {
             Some(p) if matches!(p.status, Status::Processing | Status::Done) => {
                 log::debug!("{} is already handled, ignoring", source.display());
                 return;
             }
-            Some(p) => (Some(p.added_at), p.owned_previews()),
+            Some(p) => (Some((p.added_at, p.printed_at)), p.owned_previews()),
             None => (None, Vec::new()),
         }
     };
 
     let mut photo = Photo::queued(source.clone());
-    if let Some(added_at) = known_added_at {
+    if let Some((added_at, printed_at)) = known {
         photo.added_at = added_at;
+        photo.printed_at = printed_at;
     }
     photo.status = Status::Processing;
     publish(&app, &photo);
@@ -854,6 +884,18 @@ fn share_photo(
     mac::share(&window, &destination, anchor)
 }
 
+/// Opens the print dialog, and marks the photo printed.
+///
+/// **The mark is set when the dialog opens, not when it is confirmed**, so
+/// cancelling the sheet still leaves the cell marked. macOS can tell the two
+/// apart - `runOperationModalForWindow:delegate:didRunSelector:contextInfo:` is
+/// handed `None` for both the delegate and the selector, and that pair is exactly
+/// the callback carrying `didRun: BOOL` - but wiring an Objective-C delegate class
+/// for it was judged not worth the cost. `set_photo_printed` is the correction,
+/// and a cancelled print is the ordinary reason to reach for it.
+///
+/// After `mac::print` rather than before: a dispatch that never reached the main
+/// thread put nothing on screen, so it should mark nothing either.
 #[tauri::command]
 fn print_photo(window: WebviewWindow, state: State<AppState>, source: PathBuf) -> Result<(), Payload> {
     let (destination, landscape) = destination_of(&state, &source)?;
@@ -862,7 +904,17 @@ fn print_photo(window: WebviewWindow, state: State<AppState>, source: PathBuf) -
     // destination's stem is `IMG_1234.overlay`, and the operator thinks of the
     // print as the photo they dropped.
     let title = source.file_stem().unwrap_or_default().to_string_lossy();
-    mac::print(&window, &destination, landscape, &paper, &title)
+    mac::print(&window, &destination, landscape, &paper, &title)?;
+    set_printed(window.app_handle(), &source, true)
+}
+
+/// The operator's override for the mark, from the cell's context menu.
+///
+/// A print that jammed, one made from Finder, or - most often - a print dialog
+/// that was opened and then cancelled, which `print_photo` marks anyway.
+#[tauri::command]
+fn set_photo_printed(app: AppHandle, source: PathBuf, printed: bool) -> Result<(), Payload> {
+    set_printed(&app, &source, printed)
 }
 
 /// Finder, with the file selected.
@@ -952,6 +1004,7 @@ pub fn run() {
             runtime_status,
             share_photo,
             print_photo,
+            set_photo_printed,
             reveal_photo,
         ])
         // Files dropped on the window. Tauri owns drag-and-drop (dragDropEnabled is

@@ -3,32 +3,9 @@ import { Box, Button, Flex, Kbd, SegmentedControl, Text, Tooltip } from "@radix-
 import { MagnifyingGlassIcon, ReloadIcon, Share1Icon } from "@radix-ui/react-icons";
 
 import { OrientationIcon, orientationLabel } from "./OrientationIcon";
+import { PrinterIcon } from "./PrinterIcon";
 import type { Exif, Level, Notice, Photo, View } from "../types";
 import { relativeTime } from "../relativeTime";
-
-/**
- * @radix-ui/react-icons has no printer, so this is drawn on its 15x15 grid to
- * sit level with the ReloadIcon and MagnifyingGlassIcon beside it.
- */
-function PrinterIcon() {
-  return (
-    <svg
-      width="15"
-      height="15"
-      viewBox="0 0 15 15"
-      fill="none"
-      stroke="currentColor"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      focusable="false"
-    >
-      <path d="M4.5 4.5v-3h6v3" />
-      <rect x="1.5" y="4.5" width="12" height="5" rx="1" />
-      <path d="M4.5 9.5h6v4h-6z" />
-      <path d="M11 7h0.6" strokeLinecap="round" />
-    </svg>
-  );
-}
 
 /**
  * How far the shutter time may sit from the arrival time before it is worth saying

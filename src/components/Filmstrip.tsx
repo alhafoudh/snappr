@@ -3,6 +3,7 @@ import { DotFilledIcon, FileIcon } from "@radix-ui/react-icons";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
 import { OrientationIcon } from "./OrientationIcon";
+import { PrinterIcon } from "./PrinterIcon";
 import { baseName } from "../naming";
 import type { Photo, RuntimeStatus, Settings } from "../types";
 
@@ -13,10 +14,37 @@ const FRAME_HEIGHT = "84px";
  * contain, not cover: a portrait thumb reads as portrait at a glance, which is
  * the one thing the operator most wants to know before it prints.
  *
- * The glyph in the frame's corner is the explicit answer now; this is what keeps
- * the picture agreeing with it, rather than filling the cell either way.
+ * The glyph on the facts row below the filename is the explicit answer; this is
+ * what keeps the picture agreeing with it, rather than filling the cell either
+ * way and leaving the two saying different things.
  */
 const thumb = { width: "100%", height: "100%", objectFit: "contain", display: "block" } as const;
+
+/**
+ * The facts row's height, holding its 12px glyphs.
+ *
+ * Fixed, and that is the point: a queued photo has no orientation yet and most
+ * photos have never been printed, so a row that sized to its content would leave
+ * a cell with neither glyph shorter than its neighbours and pull its filename out
+ * of line. Every cell reserves the row whether or not it has anything to put in
+ * it.
+ */
+const FACTS_HEIGHT = "16px";
+
+/**
+ * What the cell's hover says when there is nothing wrong with the photo.
+ *
+ * The clock time is the only place the print mark's timestamp is shown at all -
+ * the glyph on the facts row says *that* it was printed and the record keeps
+ * *when*, and this is what joins them up. Absolute rather than "4 minutes ago":
+ * it needs no clock ticking through this component, and reconciling a cell
+ * against a stack of prints is a question about when, not how long ago.
+ */
+function hoverLabel(photo: Photo) {
+  if (!photo.printed_at) return photo.name;
+  const at = new Date(photo.printed_at * 1000).toLocaleTimeString();
+  return `${photo.name} - printed at ${at}`;
+}
 
 /**
  * One filmstrip cell. Points at the 400px thumb, never the overlay PNG: Tauri's
@@ -46,7 +74,7 @@ function Cell({
           (react-radio-group/dist/index.mjs:94-98) - so wrapping the Item hands
           it data-state="closed" and the checked styling silently never renders.
           The symptom is a selected cell that looks exactly like an idle one. */}
-      <Tooltip content={photo.error || photo.warnings[0] || photo.name}>
+      <Tooltip content={photo.error || photo.warnings[0] || hoverLabel(photo)}>
         <Flex direction="column" gap="1" width="100%" minWidth="0">
           <Box position="relative" height={FRAME_HEIGHT} overflow="hidden">
             {photo.previews ? (
@@ -55,18 +83,6 @@ function Cell({
               <Skeleton loading={photo.status === "processing"} height="100%" width="100%">
                 <Box height="100%" />
               </Skeleton>
-            )}
-            {/* Which crop the photo landed in, in the corner the status dot does
-                not own. The word is in the label and not on the cell: "Landscape"
-                at size 1 is most of a 132px cell, and the filename would have
-                nothing left. The full sentence is on the info line under the
-                photo, which is where there is room for it. */}
-            {photo.orientation && (
-              <Box position="absolute" top="0" left="0">
-                <Text as="span" color="gray" aria-label={`${photo.orientation} photo`}>
-                  <OrientationIcon orientation={photo.orientation} size={12} />
-                </Text>
-              </Box>
             )}
             {status && (
               <Box position="absolute" top="0" right="0">
@@ -87,9 +103,9 @@ function Cell({
           <Text size="1" truncate>
             {/* A photo that arrived while the operator was elsewhere in the strip
                 and has not been looked at since. It goes before the name rather
-                than in the frame because both of the frame's top corners are
-                already taken - orientation left, status right - and because it is
-                a fact about the file, which is what the name is.
+                than in the frame because it is a fact about the file, which is
+                what the name is - and because the frame is now kept for the one
+                dot that means something is wrong.
 
                 Inside the same `Text` rather than a Flex row beside it, so the
                 name keeps one truncating text box and the ellipsis still lands in
@@ -102,6 +118,36 @@ function Cell({
             )}
             {photo.name}
           </Text>
+          {/* The facts about the photo, off the picture and under its name.
+              Glyphs rather than words because a 132px cell has room for one or
+              the other, and the name is the half the operator picks a cell by -
+              "Landscape" alone is most of the width. Both are spelled out on the
+              info line under the big photo, and in each glyph's `aria-label`.
+
+              Which crop the photo landed in, then whether it has been printed:
+              the fixed fact first, the one that changes second, so a cell that
+              gains its printer glyph does not shuffle the other along. */}
+          <Flex align="center" gap="1" height={FACTS_HEIGHT}>
+            {photo.orientation && (
+              <Text as="span" color="gray" aria-label={`${photo.orientation} photo`}>
+                <OrientationIcon orientation={photo.orientation} size={12} />
+              </Text>
+            )}
+            {/* Blue, where the orientation beside it is gray: one is a neutral
+                fact about the photo and this is the thing the operator scans the
+                strip for. Same use of the accent as the watch pill's "this is on".
+
+                A ternary rather than `&&`, because this one is a number and React
+                renders a literal `0` for `{0 && <jsx/>}`. `Photo::now` falls back
+                to 0 on a system clock before the epoch - absurd, but free to rule
+                out, and the ternary is the house style for numbers anyway, as the
+                info line's `bytes` shows. */}
+            {photo.printed_at ? (
+              <Text as="span" color="blue" aria-label="already printed">
+                <PrinterIcon size={12} />
+              </Text>
+            ) : null}
+          </Flex>
         </Flex>
       </Tooltip>
     </RadioCards.Item>

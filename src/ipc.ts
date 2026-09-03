@@ -84,6 +84,9 @@ export const cmd = {
 
   runtimeStatus: () => invoke<RuntimeStatus>("runtime_status"),
   printPhoto: (source: string) => invoke<void>("print_photo", { source }),
+  /** The operator's override for the print mark `printPhoto` sets by itself. */
+  setPhotoPrinted: (source: string, printed: boolean) =>
+    invoke<void>("set_photo_printed", { source, printed }),
   sharePhoto: (source: string, anchor: Anchor) =>
     invoke<void>("share_photo", { source, anchor }),
   revealPhoto: (source: string) => invoke<void>("reveal_photo", { source }),
