@@ -156,7 +156,17 @@ export default function App() {
   // at the left-hand end - the operator's eye never has to follow the newest cell
   // along the strip. `ordered` is the visual order, so the arrow keys, `step` and
   // the scroll-into-view below all follow from it without a second index.
-  const ordered = useMemo(() => [...photos].sort((a, b) => b.added_at - a.added_at), [photos]);
+  //
+  // **Reversed, not sorted on `added_at`, and that is a bug fix rather than a
+  // tidy-up.** `added_at` is whole seconds, so photos landing in the same second
+  // tie, and a stable sort leaves a tie in `photos` order - oldest first, inverted
+  // against the rest of the strip. A batch of arrivals therefore read backwards
+  // inside themselves and the arrow keys walked that: Right from the newest cell
+  // jumped to the oldest of the batch. Arrival order is the ground truth on both
+  // sides - `Index::upsert` pushes, `list_photos` sorts nothing, `merge` appends and
+  // replaces in place - and `added_at` is derived from it, so reversing is the same
+  // ordering at full resolution. Do not put the sort back.
+  const ordered = useMemo(() => [...photos].reverse(), [photos]);
   const current = ordered.find((p) => p.source === selected) ?? null;
   const ready = current?.status === "done" && !!current.previews;
 
@@ -171,12 +181,31 @@ export default function App() {
   );
 
   // Keep the selected cell on screen, which the keyboard would otherwise walk
-  // straight off the edge of.
+  // straight off the edge of - and keep the strip's *focus* on it too.
+  //
+  // The second half is not cosmetic. RadioCards navigates from the focused item and
+  // never from the checked one - `react-roving-focus` computes the next cell as
+  // `candidateNodes.indexOf(event.currentTarget)` - so a selection changed by
+  // anything but an arrow press leaves focus behind on the old cell, and the next
+  // arrow press steps from there. That reads as the selection teleporting into the
+  // middle of the strip, and an arriving photo did it every time.
+  //
+  // Only when focus is already inside the strip, and inside the radiogroup this very
+  // cell belongs to: otherwise an arrival would snatch focus off the button the
+  // operator was reaching for.
   useEffect(() => {
     if (!selected) return;
-    document
-      .querySelector(`[data-source="${CSS.escape(selected)}"]`)
-      ?.scrollIntoView({ inline: "nearest", block: "nearest", behavior: "smooth" });
+    const cell = document.querySelector(`[data-source="${CSS.escape(selected)}"]`);
+    if (!(cell instanceof HTMLElement)) return;
+    cell.scrollIntoView({ inline: "nearest", block: "nearest", behavior: "smooth" });
+
+    const strip = cell.closest('[role="radiogroup"]');
+    if (strip?.contains(document.activeElement) && document.activeElement !== cell) {
+      // preventScroll because the smooth scroll above owns the scrolling. On an
+      // ordinary arrow press Radix has already focused this cell, so the guard above
+      // makes this a no-op rather than a second focus event.
+      cell.focus({ preventScroll: true });
+    }
   }, [selected]);
 
   const act = useCallback(

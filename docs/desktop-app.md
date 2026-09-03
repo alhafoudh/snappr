@@ -116,8 +116,34 @@ failure is already coming back on the record.
 **Two ordering conventions coexist, on purpose.** `usePhotos` keeps arrival order
 and its "newest" fallbacks read the *last* element; `App.tsx` derives `ordered` as
 newest-first for display, so an arriving photo lands at the left-hand end where
-the operator's eye already is. Moving the sort into `usePhotos` - the obvious
+the operator's eye already is. Reordering inside `usePhotos` - the obvious
 tidy-up - silently inverts those fallbacks.
+
+**`ordered` is that arrival order reversed, and deliberately not a sort on
+`added_at`.** The sort was there first and was wrong: `added_at` is whole seconds,
+so photos landing in the same second tie, and a stable sort leaves a tie in
+`photos` order - oldest first, inverted against the rest of the strip. A batch of
+arrivals therefore read backwards *inside themselves*, and since the arrow keys
+follow `ordered`, Right from the newest cell jumped to the oldest photo of the
+batch. Arrival order is the ground truth on both sides - `Index::upsert` pushes,
+`list_photos` sorts nothing, `merge` appends and replaces in place - and `added_at`
+is derived from it, so reversing is the same ordering at full resolution with no
+ties and no dependence on clock granularity. A reprocessed photo keeps its slot
+either way, which is why `process` preserves its `added_at`.
+
+**An arrival takes the selection only from the head of the strip.** Following is
+the kiosk's point - a photo AirDropped while nobody is at the keyboard has to show
+itself - but it must not yank the operator out of a photo they navigated to, and it
+used to: the selection moved under them and, because the strip's arrow keys carry
+on from wherever focus is, their place was gone. `usePhotos` keeps an `atHead` ref
+and only follows when the selection is still the newest record.
+
+The test is "at the head" rather than "not touching the keyboard" because it
+re-arms itself by arrowing back to the newest cell, reads the same for the mouse and
+the keyboard, and leaves the operator at the head after each followed arrival, so an
+unattended run behaves exactly as it always did. **Focus was the other candidate and
+is wrong**: clicking a cell leaves focus inside the strip for the rest of the
+session, so a focus test would switch following off for good on the first click.
 
 ## The preview tier
 
@@ -434,6 +460,24 @@ Two things that look like they could be simplified and cannot:
   focused, the global keydown handler in `App.tsx` skips events originating
   inside a `[role="radiogroup"]` or `[role="group"]` - without that guard one
   arrow press moves the selection twice.
+
+  Two consequences of it owning them - the first cost a bug, the second a
+  disagreement between the two arrow paths:
+
+  **It navigates from the focused item, never from the checked one.**
+  `react-roving-focus` picks the next cell with
+  `candidateNodes.indexOf(event.currentTarget)`, so a selection changed by anything
+  but an arrow press - an arriving photo, a right-click - leaves focus behind on the
+  old cell and the next arrow press steps from *there*, which reads as the selection
+  teleporting into the middle of the strip. `App.tsx`'s `[selected]` effect closes
+  that by moving focus to the selected cell, but only when focus is already inside
+  that cell's own radiogroup: otherwise an arrival would snatch focus off the button
+  the operator was reaching for.
+
+  **`loop={false}`, because Radix loops and `step` clamps.** The strip has two arrow
+  paths and they have to feel the same, so both stop at the ends. Wrapping from the
+  oldest cell onto the newest is a jump across the whole session that nobody asked
+  for.
 - **`disabled` goes on `SegmentedControl.Root`, never on its Items.** The Item
   type removes the prop.
 - **Never wrap a `RadioCards.Item` in a `Tooltip`.** Tooltip's trigger is
@@ -448,9 +492,12 @@ Two things that look like they could be simplified and cannot:
 
 | Key | Does |
 |---|---|
-| `Left` / `Right` | next / previous thumb |
+| `Left` / `Right` | next / previous thumb, stopping at both ends |
 | `` ` `` | toggle overlayed against original |
 | `Cmd+P` | print |
+
+The arrows stop rather than wrap on **both** paths - `step` clamps, and the strip is
+`loop={false}` to match it. See the `RadioCards` note above.
 
 **Tab does nothing, anywhere in the app.** The handler calls `preventDefault` on
 it unconditionally and steps nothing, so the browser's focus traversal is
@@ -742,6 +789,10 @@ Each is argued at its own site; this is an index, not the argument.
 | routing boot's watch failure through `start_watching_noted` | emits the event twice |
 | moving `discard_superseded` before `publish` | a crash in between blanks a live cell |
 | sorting in `usePhotos` instead of `App.ordered` | inverts the newest-photo fallbacks |
+| sorting `ordered` on `added_at` instead of reversing | same-second arrivals read backwards, and the arrows walk that |
+| dropping the focus move in `App.tsx`'s `[selected]` effect | arrows step from the cell focus was left on, not the selected one |
+| following every arrival regardless of `atHead` | an arrival yanks the operator out of the photo they navigated to |
+| `loop` left at Radix's default on the strip | one arrow path wraps and the other clamps |
 | more than one worker thread | four 12MP composites at once, each holding a 25 MB output |
 | hand-editing `src/bindings/` | it is generated; `cargo test` overwrites it |
 | naming a command or an event outside `src/ipc.ts` | the drift the generated bindings exist to end |

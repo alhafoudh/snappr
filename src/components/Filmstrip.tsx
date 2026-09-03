@@ -226,6 +226,12 @@ export function Filmstrip({
               columns={`repeat(${Math.max(photos.length, 1)}, ${CELL_WIDTH}px)`}
               value={selected ?? ""}
               onValueChange={onSelect}
+              // Radix loops by default and `step` in App.tsx clamps. The strip has
+              // two arrow paths - Radix's while it has focus, `step`'s otherwise -
+              // and they have to feel the same, so both stop at the ends. Wrapping
+              // from the oldest cell onto the newest is a jump across the whole
+              // session that nobody asked for.
+              loop={false}
               aria-label="Photos"
             >
               {photos.map((photo) => (

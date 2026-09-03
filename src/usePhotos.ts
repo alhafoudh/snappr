@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { cmd, on } from "./ipc";
 import type { Orientation, Overlay, OverlayCard, Photo, RuntimeStatus, Settings } from "./types";
@@ -23,6 +23,31 @@ export function usePhotos() {
    * reconciling one.
    */
   const [overlays, setOverlays] = useState<OverlayCard[]>([]);
+
+  /**
+   * Whether the operator is still sitting at the head of the strip, which is what
+   * decides whether an arriving photo may take the selection.
+   *
+   * Following arrivals is the kiosk's whole point - a photo AirDropped while nobody
+   * is at the keyboard has to show itself. But it must not yank the operator out of
+   * a photo they navigated to on purpose: the selection moved under them, and since
+   * the strip's arrow keys carry on from wherever focus is, their place was gone.
+   *
+   * "At the head" rather than "not touching the keyboard": it re-arms itself by
+   * arrowing back to the newest cell, it reads the same for the mouse and the
+   * keyboard, and a followed arrival leaves the operator at the head again, so an
+   * unattended run behaves exactly as it always did. Focus was the other candidate
+   * and is wrong - clicking a cell leaves focus in the strip for the rest of the
+   * session, so a focus test would switch following off for good on the first click.
+   *
+   * A ref because the `photo` handler is registered once and cannot close over
+   * state. It is updated after render, so the handler reads where the operator was
+   * *before* this arrival, which is the question being asked.
+   */
+  const atHead = useRef(true);
+  useEffect(() => {
+    atHead.current = selected === null || photos[photos.length - 1]?.source === selected;
+  }, [photos, selected]);
 
   // Photos are keyed by source path, so an update to one that is already known
   // replaces it in place rather than appending a duplicate.
@@ -53,8 +78,10 @@ export function usePhotos() {
         await on.photo((photo) => {
           merge(photo);
           // Follow arrivals, so a photo that has just been AirDropped shows itself
-          // without the operator touching anything.
-          if (photo.status === "processing") setSelected(photo.source);
+          // without the operator touching anything - unless they have moved back
+          // along the strip, in which case it lands quietly and leaves them where
+          // they are. See `atHead`.
+          if (photo.status === "processing" && atHead.current) setSelected(photo.source);
         }),
       );
       // Clearing is a removal, so it cannot travel on the `photo` event: there is
