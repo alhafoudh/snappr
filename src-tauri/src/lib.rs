@@ -109,14 +109,20 @@ fn set_runtime_status(app: &AppHandle, status: RuntimeStatus) {
 /// the screen cannot disagree.
 fn publish(app: &AppHandle, photo: &Photo) {
     let state = app.state::<AppState>();
-    {
+    // **What is emitted is what was stored, not what was passed in.** `upsert`
+    // keeps the index's own three fields off an incoming record (see its comment),
+    // so the argument and the stored record can differ - and the frontend has to be
+    // told the version that won, or the cell disagrees with the index until the next
+    // event about that photo.
+    let stored = {
         let mut index = state.index.lock().unwrap();
-        index.upsert(photo.clone());
+        let stored = index.upsert(photo.clone());
         if let Err(e) = index.save(app) {
             log::warn!("cannot persist the index: {e}");
         }
-    }
-    let _ = app.emit("photo", photo);
+        stored
+    };
+    let _ = app.emit("photo", &stored);
 }
 
 /// Sets or clears a photo's print mark and publishes the record.
@@ -157,27 +163,35 @@ fn process(app: AppHandle, source: PathBuf) {
     // "added N minutes ago" label. Whatever previews that record owned are the ones
     // this run supersedes - see discard_superseded.
     //
-    // The print mark is carried over for the same reason and one of its own: paper
-    // came out of the printer, and running the overlay again does not take it back.
-    // Without this, the record below is a fresh one and a retry silently un-prints
-    // a photo. An operator who means the other thing has the cell's menu item.
-    let (known, superseded) = {
+    // Its arrival time, print mark and blue dot are kept by `Index::upsert` rather
+    // than carried across by hand here - see its comment. A retry therefore neither
+    // moves along the strip, nor un-prints a photo whose paper has already come out
+    // of the printer, nor re-dots the photo the operator is looking at, and none of
+    // those depends on this function remembering to copy a field.
+    let (superseded, busy) = {
         let index = state.index.lock().unwrap();
-        match index.get(&source) {
+        let busy = index.selected().is_some();
+        let superseded = match index.get(&source) {
             Some(p) if matches!(p.status, Status::Processing | Status::Done) => {
                 log::debug!("{} is already handled, ignoring", source.display());
                 return;
             }
-            Some(p) => (Some((p.added_at, p.printed_at)), p.owned_previews()),
-            None => (None, Vec::new()),
-        }
+            Some(p) => p.owned_previews(),
+            None => Vec::new(),
+        };
+        (superseded, busy)
     };
 
     let mut photo = Photo::queued(source.clone());
-    if let Some((added_at, printed_at)) = known {
-        photo.added_at = added_at;
-        photo.printed_at = printed_at;
-    }
+    // A blue dot means "this landed while you were busy with another photo", so an
+    // arrival with nothing selected at all does not get one: it is what the window
+    // is about to show, not something that happened behind the operator's back. The
+    // frontend follows exactly this arrival for the same reason - `nothingSelected`
+    // in `usePhotos.ts` reads the selection this is asking about.
+    //
+    // Only consulted for a genuinely new record: on a retry `upsert` keeps the mark
+    // the record already had.
+    photo.unseen = busy;
     photo.status = Status::Processing;
     publish(&app, &photo);
 
@@ -517,9 +531,36 @@ fn selected_photo(state: State<AppState>) -> Option<PathBuf> {
 /// at human speed, and `publish` already saves the whole index per photo event.
 #[tauri::command]
 fn set_selected(app: AppHandle, state: State<AppState>, source: PathBuf) -> Result<(), Payload> {
-    let mut index = state.index.lock().unwrap();
-    if index.select(source) {
-        index.save(&app)?;
+    // Looking at a photo is what clears its blue dot, so the mark is cleared here
+    // rather than by a command of its own. Every path that selects - the keyboard,
+    // a click, a right-click, the one arrival a session follows, the reconciliation
+    // after a clear - already funnels through the single effect in `usePhotos` that
+    // calls this, and a separate `mark_seen` would be a second thing all of them
+    // had to remember.
+    let cleared = {
+        let mut index = state.index.lock().unwrap();
+        let moved = index.select(source.clone());
+        // Only when there is a mark to clear, so arrowing along the strip does not
+        // emit a photo event per cell it passes.
+        let marked = index.get(&source).is_some_and(|photo| photo.unseen);
+        let cleared = if marked {
+            index.update(&source, |photo| photo.unseen = false)
+        } else {
+            None
+        };
+        // `select` reports whether it actually changed so that re-sending the value
+        // costs no write; the mark is a second reason to write, so both count.
+        if moved || cleared.is_some() {
+            index.save(&app)?;
+        }
+        cleared
+    };
+
+    // Emitted rather than `publish`ed: the record is already in the index and
+    // already saved, and `publish` would upsert and write it a second time. The
+    // block above is what drops the guard first - see `set_printed`.
+    if let Some(photo) = cleared {
+        let _ = app.emit("photo", &photo);
     }
     Ok(())
 }

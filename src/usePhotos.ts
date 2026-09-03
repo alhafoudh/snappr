@@ -31,9 +31,9 @@ export function usePhotos() {
    * **snappr picks a photo only when there is none to take away.** So the first
    * arrival of a session shows itself - an app whose out-of-the-box behaviour is
    * "nothing visibly happens" gives the operator nothing to react to - and every
-   * arrival after that lands quietly and says so with a dot. See `unseen`, which is
-   * what makes that safe: the notification used to *be* the switch, and the dot is
-   * what replaced it.
+   * arrival after that lands quietly and says so with a dot. `Photo.unseen` is what
+   * makes that safe: the notification used to *be* the switch, and the dot is what
+   * replaced it.
    *
    * Two narrower tests were tried first and both are wrong, which is worth keeping
    * because both read as obviously right:
@@ -55,41 +55,6 @@ export function usePhotos() {
   useEffect(() => {
     nothingSelected.current = selected === null;
   }, [selected]);
-
-  /**
-   * Photos that landed while the operator was elsewhere in the strip and have not
-   * been looked at since. Their cells carry a blue dot before the filename.
-   *
-   * This is the other half of `nothingSelected`. Following an arrival *was* the
-   * notification;
-   * once an arrival can land without taking the selection, something has to say it
-   * happened, or staying on the photo in hand quietly costs the operator the next
-   * one. The count in the zeroth cell going up is not enough - it does not say
-   * *which*.
-   *
-   * Session state, deliberately not in the index: it is a fact about what this
-   * operator has looked at, not about the photo. Persisting it would also mean
-   * deciding what a restored strip is, and every answer there is wrong - the whole
-   * strip dotted is a wall of blue, none of it dotted silently discards the mark on
-   * the one photo they had not got to yet.
-   */
-  const [unseen, setUnseen] = useState<ReadonlySet<string>>(new Set());
-
-  /**
-   * Selecting a photo is looking at it, so the mark goes. Reconciled against the
-   * selection rather than cleared wherever something selects - the same rule the
-   * selection itself follows below - because the paths in are the keyboard, the
-   * mouse, a right-click, a retry and the reconciliation, and a dot left on the
-   * photo filling the window is the one state that reads as a bug.
-   */
-  useEffect(() => {
-    if (selected === null || !unseen.has(selected)) return;
-    setUnseen((current) => {
-      const next = new Set(current);
-      next.delete(selected);
-      return next;
-    });
-  }, [selected, unseen]);
 
   // Photos are keyed by source path, so an update to one that is already known
   // replaces it in place rather than appending a duplicate.
@@ -119,14 +84,12 @@ export function usePhotos() {
       keep(
         await on.photo((photo) => {
           merge(photo);
-          // An arrival is either followed or marked, never both and never neither.
-          // Following shows it, so there is nothing left to announce; a photo that
-          // landed quietly has to say so itself, or the operator's own decision to
-          // stay on the photo in hand would cost them the next one. Only the first
-          // arrival of a session is followed - see `nothingSelected` and `unseen`.
-          if (photo.status === "processing") {
-            if (nothingSelected.current) setSelected(photo.source);
-            else setUnseen((current) => new Set(current).add(photo.source));
+          // Only the first arrival of a session is followed - see
+          // `nothingSelected`. Nothing has to be marked here: every record arrives
+          // `unseen` from Rust, and `set_selected` is what clears the mark, so the
+          // one arrival this does follow un-dots itself a round trip later.
+          if (photo.status === "processing" && nothingSelected.current) {
+            setSelected(photo.source);
           }
         }),
       );
@@ -138,13 +101,6 @@ export function usePhotos() {
         await on.cleared((sources) => {
           const gone = new Set(sources);
           setPhotos((current) => current.filter((photo) => !gone.has(photo.source)));
-          // A cell that is gone cannot carry a dot, so its mark goes with it. The
-          // same-object early return keeps a clear that touched nothing unseen from
-          // costing a render.
-          setUnseen((current) => {
-            const left = [...current].filter((source) => !gone.has(source));
-            return left.length === current.size ? current : new Set(left);
-          });
         }),
       );
       keep(await on.runtime(setRuntime));
@@ -280,7 +236,6 @@ export function usePhotos() {
     runtime,
     selected,
     overlays,
-    unseen,
     setSelected,
     reprocess,
     setPrinted,

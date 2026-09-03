@@ -160,15 +160,38 @@ to say it happened - otherwise the operator's decision to stay on the photo in h
 quietly costs them the next one. The count in the zeroth cell is not that something:
 it says how many, never which.
 
-`unseen` is session state and is deliberately **not** in the index. It is a fact
-about what this operator has looked at rather than about the photo, and persisting it
-would mean deciding what a restored strip is - every answer being wrong, since a
-whole strip of dots is a wall of blue and no dots at all silently discards the mark
-on the one photo they had not got to. It is cleared by selection through the same
-reconcile-against-the-selection rule the selection itself uses, because the ways in
-are the keyboard, the mouse, a right-click, a retry and the reconciliation, and a dot
-still sitting on the photo that fills the window is the one state that reads as a
-bug.
+**The mark is `Photo.unseen`, in the index.** `Photo::queued` sets it on every new
+record and `set_selected` clears it, so it survives a relaunch - which is the only
+reason it is worth having. It was React state for one commit, and that made the dot
+useless in exactly the case it exists for: quit mid-event and the mark on the one
+photo the operator had not got to was the first thing lost.
+
+It is cleared in `set_selected` rather than by a command of its own because **looking
+at a photo is what clears it**, and every path that selects - the keyboard, a click,
+a right-click, the arrival a session follows, the reconciliation after a clear -
+already funnels through the one effect in `usePhotos` that calls it. The frontend
+holds no seen/unseen state at all now: it draws `photo.unseen` off the record.
+
+**The field is spelled negatively on purpose, and that is the whole of the upgrade
+story.** `#[serde(default)]` on a `bool` is `false`, so a record written before the
+field existed loads as *seen* - the first launch after an update is quiet rather than
+a strip full of blue dots. Spelling it `seen` would need a custom serde default
+returning true to get the same behaviour, less obviously. `a_record_from_before_the
+_seen_mark_loads_as_seen` in `photo.rs` is the test, and it guards the lost-session
+failure as well: `Index::load` answers any parse error by dropping the whole
+filmstrip.
+
+**An arrival with nothing selected at all is not marked in the first place.** A dot
+means "this landed while you were busy with another photo", and the first photo of a
+session landed with the operator busy with nothing - it is what the window is about
+to show. `process` reads `index.selected().is_some()` for that, which is the same
+fact the frontend follows the arrival on, so the two cannot disagree about the one
+photo where it matters.
+
+Relying on the round trip to clear it instead is what shipped first, and it did not
+work: the mark came back a second later, permanently, for the reason under
+`Index::upsert` below. Deciding it at the source also means no dot ever flickers onto
+the first cell.
 
 ## The preview tier
 
@@ -368,6 +391,20 @@ The mark is shell bookkeeping and never reaches the pipeline. It survives a
 relaunch in `index.json`, and it survives a **reprocess**: `process` carries
 `printed_at` onto the fresh record alongside `added_at`, because paper came out of
 the printer and running the overlay again does not take it back.
+
+**`unseen` has the same lifetime, and neither is carried by `process` any more.**
+`Index::upsert` keeps `added_at`, `printed_at` and `unseen` off an incoming record,
+so the three are preserved in one place instead of copied by hand at the call site.
+
+That change was a bug fix, not tidying, and it is the one worth knowing about here:
+**`process` holds its `Photo` across a second of compositing and publishes that same
+struct at the end**, so every record it publishes is a second stale. While the
+carry-forward lived in `process`, anything the operator did to the cell during that
+second was written back out - selecting a still-processing photo cleared its blue dot
+and the finished record put it straight back and left it there. The print mark and
+the arrival time sit in the same window. `upsert_keeps_the_facts_the_pipeline_does
+_not_own` in `photo.rs` is the guard, and `publish` emits **what was stored, not what
+it was passed**, because the two now differ.
 
 ## Drops
 
@@ -884,6 +921,10 @@ Each is argued at its own site; this is an index, not the argument.
 | dropping `MAXIMIZED`/`FULLSCREEN` from those flags | a dragged-to-fill window reopens small, at the right position |
 | making `Photo::exif` non-`Option` | drops the whole session on the first launch after an update |
 | dropping `#[serde(default)]` from `Photo::printed_at` | the same, and it silently retypes the field as required in `src/bindings/Photo.ts` |
+| dropping `#[serde(default)]` from `Photo::unseen` | the same lost session, and the first launch after the update comes up with a dot on every cell |
+| renaming `Photo::unseen` to `seen` without a custom serde default | inverts it: every record from before the field loads unlooked-at |
+| letting `upsert` replace `added_at` / `printed_at` / `unseen` | the finished composite writes back what they were a second earlier, undoing anything the operator did to the cell meanwhile |
+| emitting `publish`'s argument instead of what `upsert` stored | the cell disagrees with the index until the next event about that photo |
 | dropping `Stored::Legacy` | the same, for indexes already on disk |
 | `blocking_show` for the refusal alert | freezes the window - it runs on the event thread |
 | `show` plus a channel instead of `blocking_show` in `ask` | ceremony for nothing - it is `async`, so it holds no thread worth keeping |

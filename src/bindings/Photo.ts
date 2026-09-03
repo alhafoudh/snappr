@@ -52,4 +52,20 @@ exif?: Exif, error?: string, warnings: Array<string>,
  * is why it is typed as required despite being an `Option`. Dropping the
  * `default` here would silently do the same to this field.
  */
-printed_at?: number, };
+printed_at?: number, 
+/**
+ * Whether the photo has arrived and not been looked at yet - the blue dot
+ * before the filename in its cell. Set on every new record and cleared by
+ * selecting it, in `set_selected`.
+ *
+ * **Negative on purpose**, and the whole of the upgrade story: `#[serde
+ * (default)]` on a `bool` is `false`, so a record written before this field
+ * existed loads as *seen* and an update is quiet rather than a strip full of
+ * dots. Spelling it `seen` would need a custom serde default returning true to
+ * get the same thing, which is the same behaviour spelled less obviously.
+ *
+ * No `skip_serializing_if`, so this stays a **required** `boolean` in
+ * `src/bindings/Photo.ts`: it is the *pair* of attributes that makes a field
+ * optional there, as `printed_at` above explains and `warnings` demonstrates.
+ */
+unseen: boolean, };

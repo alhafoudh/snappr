@@ -109,6 +109,21 @@ pub struct Photo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(type = "number")]
     pub printed_at: Option<u64>,
+    /// Whether the photo has arrived and not been looked at yet - the blue dot
+    /// before the filename in its cell. Set on every new record and cleared by
+    /// selecting it, in `set_selected`.
+    ///
+    /// **Negative on purpose**, and the whole of the upgrade story: `#[serde
+    /// (default)]` on a `bool` is `false`, so a record written before this field
+    /// existed loads as *seen* and an update is quiet rather than a strip full of
+    /// dots. Spelling it `seen` would need a custom serde default returning true to
+    /// get the same thing, which is the same behaviour spelled less obviously.
+    ///
+    /// No `skip_serializing_if`, so this stays a **required** `boolean` in
+    /// `src/bindings/Photo.ts`: it is the *pair* of attributes that makes a field
+    /// optional there, as `printed_at` above explains and `warnings` demonstrates.
+    #[serde(default)]
+    pub unseen: bool,
 }
 
 fn now() -> u64 {
@@ -141,6 +156,11 @@ impl Photo {
             error: None,
             warnings: Vec::new(),
             printed_at: None,
+            // Unlooked-at is the safe default for a record nobody has decided about
+            // yet - a dot the operator does not need is a smaller wrong than a photo
+            // that arrived without saying so. `process` overrides it per arrival,
+            // and `upsert` keeps it across a reprocess.
+            unseen: true,
         }
     }
 
@@ -323,12 +343,43 @@ impl Index {
         true
     }
 
-    /// Inserts or replaces by source path, so re-processing a photo updates its
-    /// existing cell rather than adding a second one.
-    pub fn upsert(&mut self, photo: Photo) {
+    /// Inserts or replaces by source path - so re-processing a photo updates its
+    /// existing cell rather than adding a second one - and hands back what is now
+    /// stored.
+    ///
+    /// **The operator's own facts survive the replacement, and that is not a
+    /// nicety.** `added_at`, `printed_at` and `unseen` belong to the index; the rest
+    /// of the record belongs to the pipeline. `process` holds its `Photo` across a
+    /// second of compositing and publishes that same struct at the end, so an
+    /// incoming record is always a second stale, and without this it writes back
+    /// whatever those three fields were when the photo was queued.
+    ///
+    /// That is a lost update, and it shipped once: selecting a photo while it
+    /// composited cleared its blue dot, and then the finished record put the dot
+    /// straight back and left it there. Anything the operator does to a cell during
+    /// its own second of work is in this window.
+    ///
+    /// Preserving them here rather than in the caller is what makes the ownership
+    /// one rule in one place. `process` used to carry the three forward by hand and
+    /// nothing failed to compile when a field was left out of that tuple.
+    pub fn upsert(&mut self, photo: Photo) -> Photo {
         match self.photos.iter_mut().find(|p| p.source == photo.source) {
-            Some(existing) => *existing = photo,
-            None => self.photos.push(photo),
+            Some(existing) => {
+                let added_at = existing.added_at;
+                let printed_at = existing.printed_at;
+                let unseen = existing.unseen;
+
+                *existing = photo;
+                existing.added_at = added_at;
+                existing.printed_at = printed_at;
+                existing.unseen = unseen;
+
+                existing.clone()
+            }
+            None => {
+                self.photos.push(photo.clone());
+                photo
+            }
         }
     }
 
@@ -408,5 +459,73 @@ mod tests {
         photo.printed(false);
         assert_eq!(photo.printed_at, None);
         assert!(!serde_json::to_string(&photo).unwrap().contains("printed_at"));
+    }
+
+    /// A record written before `unseen` existed must load as *seen*.
+    ///
+    /// Two failures in one: the lost session `a_record_from_before_the_print_mark
+    /// _still_loads` describes, and - because the field is spelled negatively so
+    /// that `#[serde(default)]` means "seen" - the first launch after an update
+    /// coming up with a blue dot on every cell in the strip.
+    #[test]
+    fn a_record_from_before_the_seen_mark_loads_as_seen() {
+        let legacy = r#"{
+            "source": "/Users/someone/Downloads/IMG_1234.heic",
+            "name": "IMG_1234.heic",
+            "status": "done",
+            "added_at": 1772534400,
+            "warnings": []
+        }"#;
+
+        let photo: Photo = serde_json::from_str(legacy).expect("an older record must still load");
+        assert!(!photo.unseen, "a record from before the mark must not arrive dotted");
+    }
+
+    /// The finished composite must not write the operator's own facts back to what
+    /// they were when the photo was queued.
+    ///
+    /// This is the lost update `upsert` exists to stop, and it shipped: `process`
+    /// holds its record across a second of compositing, so selecting a photo while
+    /// it worked cleared the blue dot and the finished record put it straight back.
+    /// The same window covers the print mark and the arrival time.
+    #[test]
+    fn upsert_keeps_the_facts_the_pipeline_does_not_own() {
+        let source = PathBuf::from("/Users/someone/Downloads/IMG_1234.heic");
+        let mut index = Index::default();
+        index.upsert(Photo::queued(source.clone()));
+
+        // The operator looks at the cell and prints it while it is still working.
+        index.update(&source, |photo| {
+            photo.unseen = false;
+            photo.printed(true);
+        });
+        let added_at = index.get(&source).expect("just inserted").added_at;
+
+        // A second later the pipeline publishes the record it has been holding,
+        // which still says unseen, unprinted, and carries its own arrival time.
+        let mut finished = Photo::queued(source.clone());
+        finished.status = Status::Done;
+        finished.added_at = added_at + 900;
+
+        let stored = index.upsert(finished);
+        assert!(!stored.unseen, "a finished composite must not re-dot the photo");
+        assert!(stored.printed_at.is_some(), "nor un-print it");
+        assert_eq!(stored.added_at, added_at, "nor move it along the strip");
+        assert_eq!(stored.status, Status::Done, "but the pipeline's own fields do land");
+    }
+
+    /// And the mark round-trips, so a photo the operator never got to is still
+    /// waiting for them after a relaunch. That is the whole point of persisting it.
+    #[test]
+    fn the_seen_mark_survives_a_round_trip() {
+        let mut photo = Photo::queued(PathBuf::from("/Users/someone/Downloads/IMG_1234.heic"));
+        assert!(photo.unseen, "a new record starts unlooked-at");
+
+        let back: Photo = serde_json::from_str(&serde_json::to_string(&photo).unwrap()).unwrap();
+        assert!(back.unseen);
+
+        photo.unseen = false;
+        let back: Photo = serde_json::from_str(&serde_json::to_string(&photo).unwrap()).unwrap();
+        assert!(!back.unseen);
     }
 }

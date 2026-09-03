@@ -55,15 +55,7 @@ function hoverLabel(photo: Photo) {
  * selection; status is a dot in the corner. An earlier version put both on the
  * border, and a selected photo that had a warning simply showed no selection.
  */
-function Cell({
-  photo,
-  unseen,
-  onMenu,
-}: {
-  photo: Photo;
-  unseen: boolean;
-  onMenu: (event: React.MouseEvent) => void;
-}) {
+function Cell({ photo, onMenu }: { photo: Photo; onMenu: (event: React.MouseEvent) => void }) {
   const status = photo.status === "failed" ? "failed" : photo.warnings.length > 0 ? "warned" : null;
 
   return (
@@ -111,7 +103,7 @@ function Cell({
                 name keeps one truncating text box and the ellipsis still lands in
                 the right place. `verticalAlign` is inline because Radix has no
                 prop for it and a 15px icon sits high on a size-1 line. */}
-            {unseen && (
+            {photo.unseen && (
               <Text as="span" color="blue" aria-label="not looked at yet">
                 <DotFilledIcon style={{ verticalAlign: "middle" }} />
               </Text>
@@ -251,7 +243,6 @@ function WatchCell({
 export function Filmstrip({
   photos,
   selected,
-  unseen,
   settings,
   runtime,
   count,
@@ -263,8 +254,6 @@ export function Filmstrip({
 }: {
   photos: Photo[];
   selected: string | null;
-  /** Sources that arrived unlooked-at; their cells carry a blue dot. */
-  unseen: ReadonlySet<string>;
   settings: Settings | null;
   runtime: RuntimeStatus;
   count: number;
@@ -310,7 +299,6 @@ export function Filmstrip({
                 <Cell
                   key={photo.source}
                   photo={photo}
-                  unseen={unseen.has(photo.source)}
                   onMenu={onCellMenu(photo)}
                 />
               ))}
