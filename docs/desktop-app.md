@@ -50,9 +50,9 @@ failure mode that looks like something else:
   `Snappr.logger` writes to `$stderr` for exactly this reason.
 - **Strictly sequential, and that is the deduplication mechanism.** The same photo
   cannot be in flight twice because it cannot be sent twice. `server.rb` notes
-  that this is why it needs none of the in-flight `Set` and mutex that
-  `Watcher` requires to survive `listen`'s event bursts. Adding concurrency here
-  moves that responsibility with no replacement.
+  that this is why it needs none of the in-flight `Set` and mutex that `Watcher`
+  keeps for a path listen announces as added more than once. Adding concurrency
+  here moves that responsibility with no replacement.
 - **Each frame is flushed.** `stdin.flush()` on the Rust side, `@output.sync =
   true` on the Ruby side. Both halves are needed or the handshake deadlocks.
 
@@ -193,12 +193,21 @@ is correct and faster: the standalone bundle puts the gems on `$LOAD_PATH` itsel
 headless CLI path (`mise run watch`) and uses the `listen` gem. Both exist because
 the CLI predates the app and is still the iteration loop.
 
-The Rust one carries three behaviours over from the Ruby one rather than
-reinventing them, each established by measurement and each easy to get wrong in a
-way that only shows at an event: **non-recursive** (the 63-seconds-of-pinned-core
-fix, argued in full in `CLAUDE.md` under Hard constraints), **filter before
-touching the disk**, and **debounce on size and mtime** because AirDrop writes
-non-atomically and a file that exists is not a file that is finished.
+The Rust one carries four behaviours over from the Ruby one rather than
+reinventing them, each easy to get wrong in a way that only shows at an event:
+**non-recursive** (the 63-seconds-of-pinned-core fix), **arrivals only**, **filter
+before touching the disk**, and **debounce on size and mtime** because AirDrop
+writes non-atomically and a file that exists is not a file that is finished. The
+first two are argued in full in `CLAUDE.md` under Hard constraints.
+
+The second is the one to read before touching this file. `listen` gives the Ruby
+side "added" for free by diffing directory snapshots; there is no equivalent here,
+and **event kinds cannot substitute for it** - FSEvents accumulates flags per path,
+so `Create(File)` is reported for a chmod, an append and a deletion alike, even on
+a file that predates the watch. So `watcher.rs` ignores kinds and keeps the state
+instead: `already_there` for what was in the folder when the watch began, and
+`admit` for the rule. The live tests in that file, `#[ignore]`d and run with
+`cargo test -- --ignored`, exist because this is not catchable any other way.
 
 `watcher::refusal` is the single implementation of the candidate rule and
 `is_candidate` delegates to it, so the filter and the explanation it gives the
@@ -212,9 +221,25 @@ the *common* answer:
    which has one file, not 1.9k - upgrades it to `IsAFolder` with a single
    `is_dir()`.
 
+Both constraints are on `refusal` specifically, not on everything downstream of an
+event. `presence` does stat, and is allowed to: by the time it runs the event has
+already been accepted as an arrival naming a candidate file, which is the rare
+case, and the poll loop has to stat that path anyway.
+
 `Arrival::Abandoned` is reported rather than only logged because no record has
 been published for that file yet, so a stalled AirDrop had nothing on screen and
 used to disappear in silence.
+
+**It is not the last word on that path, though.** `Arriving::stalled` keeps a file
+under observation after the message has gone out, so a very slow transfer that
+finishes long after the 30-second timeout still arrives as a `Settled` and
+`process` replaces the failed record in place - which is what the comment beside
+the failed cell in `lib.rs` promises. That has to be polling rather than events:
+the writes that would finish the transfer are not arrivals. Two rules come with
+it. A stalled entry is dropped once its path is gone, so a cancelled AirDrop the
+operator deletes does not sit in the map for the length of an event; and a stalled
+entry must never be what holds the poll thread open, or every change of folder and
+every toggle of the watch leaks one.
 
 ## Settings on disk
 

@@ -35,8 +35,20 @@ module Snappr
       # Note this is not the same thing as the `only:` filter or candidate?: both
       # of those run *after* the scan, so they stop the work but not the walk.
       # AirDrop only ever lands files at the top level, so nothing is lost.
-      listener = Listen.to(dir.to_s, only: /\.[^.\/]+\z/, ignore: %r{/}) do |modified, added, _removed|
-        (added + modified).uniq.each { |path| handle(path) }
+      # Only `added`. A write to a photo already sitting in the folder, a chmod and
+      # a Finder tag are all somebody else's business - the drop folder is the
+      # operator's real ~/Downloads and most of what happens in it has nothing to
+      # do with snappr. The app's watcher had a worse version of the same habit: it
+      # acted on removals too, and told the operator a transfer had stalled for a
+      # file they had just deleted.
+      #
+      # listen decides `added` by diffing directory snapshots, so this is the whole
+      # of it here: a photo *moved* into the folder counts, and a photo already
+      # there being touched does not. The app's watcher has no equivalent and has
+      # to keep that state by hand - see `already_there` in `watcher.rs`, and
+      # CLAUDE.md for why its event kinds cannot be used for this.
+      listener = Listen.to(dir.to_s, only: /\.[^.\/]+\z/, ignore: %r{/}) do |_modified, added, _removed|
+        added.each { |path| handle(path) }
       end
       listener.start
 
@@ -101,8 +113,12 @@ module Snappr
       end
     end
 
-    # listen emits a burst of modify events for a single arriving file; without
-    # this the same photo would be composited several times concurrently.
+    # Keeps one photo from being composited twice over. This used to be about
+    # listen's burst of modify events for a single arriving file, and since only
+    # `added` is acted on that burst is gone - what is left is a path being
+    # announced as added more than once across callbacks, which is what happens
+    # when a file is created, removed and created again while the first `handle` is
+    # still inside its 30-second `wait_until_stable`.
     def claim(path) = @mutex.synchronize { @in_flight.add?(path) ? true : false }
     def release(path) = @mutex.synchronize { @in_flight.delete(path) }
 

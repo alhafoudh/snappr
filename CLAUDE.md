@@ -358,6 +358,74 @@ If this ever needs to go further, the next stop is dropping `listen` for a plain
 40x cheaper again, and `wait_until_stable` already covers the partial-write
 problem that fsevents were buying.
 
+**Both watchers act only on a photo being added.** The paragraph above is about
+which *directories* are watched; this one is about which *changes* are acted on,
+and the reason is correctness rather than CPU. The drop folder is the operator's
+real `~/Downloads`, so nearly everything that happens in it - a file being written
+to, a chmod, a Finder tag, a deletion - has nothing to do with snappr, and acting
+on any of it means acting on the operator's unrelated business.
+
+The app's watcher got this wrong twice, in opposite directions, and both are worth
+knowing because neither looks wrong.
+
+**First: it acted on everything.** It never looked at the event at all, so a
+*deletion* was fed through the same path as an arrival, and nothing could tell
+"file missing" from "file present and still empty" - so a deleted candidate was
+tracked as a transfer that had only just begun, never settled, and 30 seconds
+later told the operator their transfer had stalled, for a file they had thrown
+away. The symptom was not a missing photo but a false statement. `Presence` in
+`watcher.rs` is the three-way answer that closes it.
+
+**Then: the obvious fix does not work.** Filtering on `EventKind::Create` reads
+correctly, passes every hand test on a fresh file, and is wrong.
+**On macOS an event's kind cannot tell you whether a file was just added.**
+FSEvents accumulates flags per path, so `ITEM_CREATED` keeps being reported for
+every later event on that path. Measured against notify 8.2, a plain `xattr -w`
+on a file that existed *before the watch started* arrives as `Create(File)`,
+`Modify(Metadata(Extended))` and `Modify(Data(Content))` together - and so do an
+append, a truncating rewrite, a chmod and a deletion. Only two operations came
+back with a single honest kind: a rename into the folder and a rename out of it,
+both `Modify(Name(Any))`, with no way to tell which side is which. So a
+kind-based filter admits everything while looking like it admits one thing.
+
+**What works is state, not kinds.** `watcher.rs` ignores event kinds entirely and
+decides from the folder's own contents: `already_there` lists the candidate names
+present when the watch begins, and `admit` calls a name an arrival only if it was
+not in that set. That is also how the Ruby side gets the same answer - `listen`
+diffs directory snapshots, so `added` already means this, which is why
+`watcher.rb` needed nothing but dropping `modified` from the block.
+
+Two details of the listing are load-bearing. It **must be canonicalised**, because
+notify reports fully resolved paths (`/var/...` arrives as `/private/var/...`) and
+an uncanonicalised set silently never matches anything, putting the watcher back to
+acting on every touch with nothing erroring. And it is **one non-recursive
+listing** - 1965 top-level entries, measured 55ms cold and 2ms warm, once per
+watch - not the 19k-file recursive walk the paragraph above forbids. What it finds
+is remembered, never printed.
+
+The cost is that **a photo rewritten in place no longer retriggers anything**. That
+is intended, and was already true in the app for its own reason (`process` returns
+early for a record that is `Processing` or `Done`). The retries are the per-photo
+button and `mise run overlay PATH`.
+
+One consequence needed real code rather than a comment: a stalled transfer must
+still recover on its own. The app publishes a failed "transfer stalled" cell at 30
+seconds, and used to get out of it because the transfer's later writes came back as
+modify events. Those are not arrivals any more, so `Arriving::stalled` keeps the
+path under observation after the message has gone out - the poll that decides
+settling is already the right test, so nothing new decides it. The rule that comes
+with it: a stalled entry must never be what holds the poll thread open, or every
+folder change and watch toggle leaks a thread.
+
+Neither watcher has ever scanned the folder at startup, and still does not - a
+photo already sitting there when the watch begins is remembered and left alone.
+Drops, `mise run overlay` and the retry button all still reach it.
+
+The live tests in `watcher.rs` are `#[ignore]`d and run with
+`cargo test -- --ignored`. Keep them. They drive the real watcher through real
+fsevents, they are the only reason either mistake above was found rather than
+shipped, and the pure tests beside them provably cannot catch this class of bug.
+
 ## The overlay SVGs
 
 **snappr ships no branding, but it does ship one sample.** There are two overlay
@@ -735,9 +803,12 @@ numbers about layout - the paper's two dimensions, in `config/snappr.yml`.
   waits for size and mtime to stop changing (two matching reads 0.3s apart,
   giving up after 30s) before compositing. `.download`, `.part` and
   `.crdownload` names are ignored outright.
-- `listen` emits a burst of modify events for one arriving file. An in-memory
-  in-flight `Set`, guarded by a mutex, keeps the same photo from being
-  composited several times concurrently.
+- An in-memory in-flight `Set`, guarded by a mutex, keeps the same photo from
+  being composited twice over. This was originally about `listen`'s burst of
+  modify events for one arriving file; since only `added` is acted on that burst
+  is gone, and what is left is the same path being announced as added again -
+  created, removed, created - while the first `handle` is still inside its
+  30-second `wait_until_stable`.
 - One bad photo must not take the daemon down. `Watcher#handle` logs and moves
   on. There is no retry and no reject folder: the original is still sitting in
   `~/Downloads`, so `mise run overlay` on it is the retry.

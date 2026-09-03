@@ -366,7 +366,11 @@ fn start_watching(app: &AppHandle, settings: &Settings) -> Result<(), String> {
             // operator's AirDrop simply vanishes. A failed cell is self-healing:
             // if the transfer was cancelled the record is dropped on the next
             // launch by Photo::intact, and if it completes later the watcher
-            // re-sees the file and `process` replaces the record in place.
+            // settles it after all and `process` replaces the record in place.
+            // Giving up is only about the message; the watcher keeps the path
+            // under observation, which it has to do by polling because the writes
+            // that would finish the transfer are not arrivals. See
+            // `Arriving::stalled` in watcher.rs.
             Arrival::Abandoned(path) => {
                 let mut photo = Photo::queued(path.clone());
                 let said = Problem::TransferStalled {
