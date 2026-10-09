@@ -95,6 +95,7 @@ mise run test             the whole suite, including the golden diff
 mise run test-live        the watcher tests that drive real fsevents
 mise run dev              the app, against Vite
 mise run app              build Snappr.app with the bundled libvips inside it
+mise run install          build it and copy it into ~/Applications, replacing the old one
 mise run runtime          build that libvips, relocate its closure, prove it
 ```
 
