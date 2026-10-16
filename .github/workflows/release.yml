@@ -1,0 +1,116 @@
+# Builds Snappr.app with the bundled libvips and publishes it two ways from one
+# build: a DMG, and the .app zipped with `ditto` so its signatures and symlinks
+# survive.
+#
+# A `v*` tag publishes a GitHub release. Running it by hand builds the same files
+# and only uploads them as workflow artifacts, which is the way to try a change to
+# this file without cutting a release.
+#
+# Apple Silicon only: libvips is built against the runner's Homebrew, and that is
+# arm64. The app is ad-hoc signed, not notarised - see the release notes below.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      HOMEBREW_NO_INSTALL_CLEANUP: 1
+      HOMEBREW_NO_ENV_HINTS: 1
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Read the version
+        id: version
+        run: |
+          version=$(jq -r .version src-tauri/tauri.conf.json)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match version $version in src-tauri/tauri.conf.json"
+            exit 1
+          fi
+
+      # The same Homebrew a developer has after `brew install vips`: libvips is
+      # built from source against these, and `cargo xtask closure` copies the ones
+      # it links into the bundle. The `vips` formula itself is never linked by a
+      # release build - `cargo xtask verify` fails the job if it is.
+      - name: Install libvips build dependencies
+        run: brew install vips meson ninja pkgconf
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - run: npm ci
+
+      - uses: jdx/mise-action@v5
+
+      # libvips from source, its relocated dylib closure, and the gate that proves
+      # the result runs without Homebrew.
+      - name: Build the bundled libvips
+        run: mise run runtime
+
+      # `mise run app` builds only the .app, because a local DMG build opens a
+      # Finder window on every run. CI is where the DMG is wanted, and Tauri skips
+      # the Finder layout when `CI` is set.
+      - name: Build Snappr.app and the DMG
+        run: npm run tauri build -- --bundles app,dmg --config src-tauri/tauri.frameworks.json
+
+      - name: Collect the release files
+        id: files
+        run: |
+          version=${{ steps.version.outputs.version }}
+          out=target/release/bundle
+          mkdir -p dist-release
+          cp "$out"/dmg/Snappr_"$version"_aarch64.dmg dist-release/
+          ditto -c -k --sequesterRsrc --keepParent "$out"/macos/Snappr.app dist-release/Snappr_"$version"_aarch64.app.zip
+          (cd dist-release && shasum -a 256 ./* > SHA256SUMS.txt)
+          ls -la dist-release
+          cat dist-release/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Snappr-${{ steps.version.outputs.version }}-aarch64
+          path: dist-release/*
+          if-no-files-found: error
+
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist-release/*
+          generate_release_notes: true
+          body: |
+            ## 📦 Downloads
+
+            - **`Snappr_${{ steps.version.outputs.version }}_aarch64.dmg`** - open it and drag Snappr to Applications
+            - **`Snappr_${{ steps.version.outputs.version }}_aarch64.app.zip`** - the app itself, zipped
+
+            Apple Silicon (M1 and later), macOS 11 or newer. libvips is bundled, so Homebrew is not needed.
+
+            ## ⚠️ First launch
+
+            The app is not notarised, so macOS will refuse to open it the first time. Either right-click Snappr.app and choose **Open**, or clear the quarantine flag:
+
+            ```sh
+            xattr -dr com.apple.quarantine /Applications/Snappr.app
+            ```
