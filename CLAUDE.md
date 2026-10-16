@@ -96,6 +96,7 @@ mise run dev              the app, against Vite
 mise run app              build Snappr.app with the bundled libvips inside it
 mise run install          build it and copy it into ~/Applications, replacing the old one
 mise run runtime          build that libvips, relocate its closure, prove it
+mise run screenshot       rebuild every README image from the stock photos and the real app
 ```
 
 There is no `setup` task: `cargo` fetches what it needs. `mise run runtime` and

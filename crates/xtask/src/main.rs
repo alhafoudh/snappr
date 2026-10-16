@@ -9,6 +9,13 @@
 //! cargo xtask runtime    all three
 //! ```
 //!
+//! And one that has nothing to do with the runtime, which lives here because it
+//! is a build task too:
+//!
+//! ```text
+//! cargo xtask screenshot every README image, from stock photos and the real app
+//! ```
+//!
 //! **Why any of this exists**: Homebrew's libvips loads its format support -
 //! including HEIC - from a module directory baked in at compile time, so a copied
 //! Homebrew libvips silently cannot decode an iPhone photo. libvips is therefore
@@ -19,6 +26,7 @@
 
 mod closure;
 mod libvips;
+mod screenshot;
 mod verify;
 
 use std::path::{Path, PathBuf};
@@ -36,16 +44,18 @@ fn main() -> ExitCode {
         "runtime" => libvips::run(&root, force)
             .and_then(|()| closure::run(&root, force))
             .and_then(|()| verify::run(&root)),
+        "screenshot" => screenshot::run(&root),
         other => {
             if !other.is_empty() {
                 eprintln!("xtask: no task called {other:?}");
             }
             eprintln!(
-                "usage: cargo xtask <libvips|closure|verify|runtime> [--force]\n\n  \
-                 libvips  build libvips from source into build/libvips-prefix\n  \
-                 closure  collect and relocate its dylibs into build/vips\n  \
-                 verify   prove the bundle carries its own libvips\n  \
-                 runtime  all three, in order"
+                "usage: cargo xtask <libvips|closure|verify|runtime|screenshot> [--force]\n\n  \
+                 libvips     build libvips from source into build/libvips-prefix\n  \
+                 closure     collect and relocate its dylibs into build/vips\n  \
+                 verify      prove the bundle carries its own libvips\n  \
+                 runtime     all three, in order\n  \
+                 screenshot  regenerate every README image in docs/images"
             );
             return ExitCode::FAILURE;
         }

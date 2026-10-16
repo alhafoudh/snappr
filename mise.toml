@@ -90,3 +90,10 @@ run = [
   "rm -rf \"$HOME/Applications/Snappr.app\"",
   "ditto target/release/bundle/macos/Snappr.app \"$HOME/Applications/Snappr.app\"",
 ]
+
+[tasks.screenshot]
+description = "regenerate every README image: the demo prints and a screenshot of the app"
+# Local only: the capture needs Screen Recording permission for the terminal. The
+# app runs under its own bundle identifier, so your real Snappr settings and
+# filmstrip are never touched. Keep the mouse off its window while it runs.
+run = "cargo xtask screenshot"

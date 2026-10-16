@@ -905,6 +905,33 @@ operator actually dropped.
 
 ---
 
+## The README screenshot
+
+`mise run screenshot` (`crates/xtask/src/screenshot.rs`) launches the real app,
+feeds it the stock photos in `docs/images/stock/` and captures the window into
+`docs/images/app.png`. The same run rebuilds the `demo-*` images through
+`snappr-cli`. Three things about it are not obvious:
+
+- **It runs under its own bundle identifier**, `sk.freevision.snappr.screenshot`,
+  passed to `tauri dev --config`. The app has no override for
+  `app_config_dir()`/`app_data_dir()`, so under the real identifier a dev run
+  would rewrite the operator's `settings.json` and filmstrip. The task wipes and
+  seeds that separate directory instead, which is also why two runs start from
+  the same state.
+- **Feed order decides the stage.** The app selects only the first arrival of a
+  session (`nothingSelected` in `src/usePhotos.ts`), so `01-*` fills the stage
+  and every later photo shows a blue dot. Renumber the files to change the shot.
+  Do not add a selection call to the harness instead: the picture should show
+  what the app actually does.
+- **It has a minute.** Cells read "just now" only while the oldest arrival is
+  under 60 seconds old, so the task fails rather than capture a strip that says
+  "1 minute ago".
+
+The capture needs Screen Recording permission for the terminal, and a Vite dev
+session must not hold port 5183. It is a local task, not a CI one.
+
+---
+
 ## Things a simplification would break
 
 Each is argued at its own site; this is an index, not the argument.

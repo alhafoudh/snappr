@@ -56,6 +56,10 @@ bit-for-bit lossless, and the test suite proves it:
 
 ## 🖥️ The desktop app
 
+<p align="center">
+  <img src="docs/images/app.png" alt="Snappr with five photos in the filmstrip and the sample overlay">
+</p>
+
 **Snappr.app** is a Tauri app with a React UI around the Rust pipeline:
 
 - 🎞️ **Filmstrip** of every photo that arrived, with a blue dot on the ones you
@@ -185,3 +189,7 @@ The design decisions, and the measurements behind them, are in
 ## 📄 License
 
 [MIT](LICENSE) © Freevision s.r.o.
+
+The photos in the pictures above are from Unsplash, under the Unsplash License,
+not MIT. See [`docs/images/stock/LICENSE.md`](docs/images/stock/LICENSE.md).
+`mise run screenshot` rebuilds every picture in this README from them.
