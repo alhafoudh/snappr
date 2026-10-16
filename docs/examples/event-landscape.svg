@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2960" height="2000" viewBox="0 0 2960 2000">
+  <path fill-rule="evenodd" fill="#111827" d="M0 0H2960V2000H0Z M80 80V1920H1776V80Z"/>
+  <rect x="80" y="80" width="1696" height="1840" fill="#FF00FF"/>
+  <g font-family="Helvetica, Arial, sans-serif" text-anchor="middle" fill="#ffffff">
+    <text x="2368" y="760" font-size="190" font-weight="bold">YOUR</text>
+    <text x="2368" y="960" font-size="190" font-weight="bold">EVENT</text>
+    <rect x="2148" y="1060" width="440" height="12" fill="#f472b6"/>
+    <text x="2368" y="1240" font-size="90" fill="#f9a8d4">#snappr</text>
+    <text x="2368" y="1400" font-size="70" fill="#9ca3af">16 . 10 . 2026</text>
+  </g>
+</svg>

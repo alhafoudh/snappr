@@ -3,11 +3,9 @@
 /**
  * What an orientation composites over the crop.
  *
- * `Sample` is whatever snappr ships for that slot - which for portrait is
- * nothing, so a portrait `Sample` prints exactly like `None`. That is the
- * variant's meaning rather than a hole in it: it keeps the type independent of
- * which field it sits on, and a portrait sample drawn later is then picked up by
- * every install that never chose.
+ * `Sample` is whatever snappr ships for that slot, so the variant means the same
+ * thing on either field and a redrawn sample is picked up by every install that
+ * never chose.
  *
  * `Custom` remembers the path rather than copying the file, so re-exporting a
  * design over the same path takes effect on the next photo with no re-picking.

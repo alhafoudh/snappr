@@ -5,6 +5,8 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
+license.workspace = true
+repository.workspace = true
 
 # Not `snappr`: macOS filesystems are case-insensitive by default, and the app's
 # binary is `Snappr`. Two targets whose names differ only in case would collide in

@@ -143,7 +143,7 @@ fn resolved(app: &AppHandle, settings: &Settings) -> Vec<(Overlay, PathBuf, Stri
         .iter()
         .filter_map(|overlay| {
             // The slot an overlay is resolved against only matters for `Sample`,
-            // and the sample only exists for landscape.
+            // whose card is drawn from its landscape file.
             let path = overlay.resolve(app, Orientation::Landscape)?;
             path.is_file().then(|| {
                 let key = key_for(&path);

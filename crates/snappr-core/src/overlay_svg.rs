@@ -829,6 +829,24 @@ mod tests {
         assert!((window.height - 1616.0 / 2960.0).abs() < 0.005, "{window:?}");
     }
 
+    /// The shipped samples are watermarks: a redraw that inset either window would
+    /// silently turn every default print into a bordered one, and one drawn at the
+    /// wrong shape would stretch the wordmark.
+    #[test]
+    fn the_shipped_samples_cover_the_whole_frame_at_the_paper_shape() {
+        vips::init().unwrap();
+        let sample = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sample");
+
+        for (name, ratio) in [("overlay-landscape.svg", 1.48), ("overlay-portrait.svg", 1.0 / 1.48)] {
+            let path = sample.join(name);
+            let window = photo_window(&path, None).unwrap();
+            assert_eq!((window.x, window.y, window.width, window.height), (0.0, 0.0, 1.0, 1.0), "{name}");
+
+            let aspect = aspect_ratio(&path, None).unwrap().unwrap();
+            assert!((aspect / ratio - 1.0).abs() < 0.01, "{name} is {aspect}, not {ratio}");
+        }
+    }
+
     #[test]
     fn an_overlay_with_no_marker_is_reported_clearly() {
         vips::init().unwrap();

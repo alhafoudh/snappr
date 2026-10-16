@@ -25,6 +25,11 @@ use snappr_core::overlay::Overlay;
 use snappr_core::problem::name_of;
 use snappr_core::vips;
 
+/// Cases still in a capture whose overlay is no longer in the repo. Their SVG was
+/// a real client's branding and was removed before the repo went public, so an
+/// older capture names a file that cannot be read.
+const RETIRED: &[&str] = &["landscape_8bit_share_overlay"];
+
 fn goldens() -> Option<PathBuf> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../build/goldens");
     dir.join("manifest.json").is_file().then_some(dir)
@@ -109,6 +114,9 @@ fn the_rust_pipeline_reproduces_the_ruby_output() {
     let mut failures: Vec<String> = Vec::new();
 
     for (name, case) in cases {
+        if RETIRED.contains(&name.as_str()) {
+            continue;
+        }
         if case.get("error").is_some() {
             // The Ruby run failed this case on purpose; nothing to compare.
             continue;
@@ -274,7 +282,6 @@ fn the_photo_survives_bit_for_bit_wherever_the_overlay_is_clear() {
         "landscape_8bit_fixture_overlay",
         "portrait_8bit_fixture_overlay",
         "landscape_8bit_shipped_sample",
-        "landscape_8bit_share_overlay",
         "landscape_16bit_fixture_overlay",
     ] {
         let case = &manifest["cases"][name];

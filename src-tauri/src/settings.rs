@@ -30,10 +30,9 @@ pub const SAMPLE_NAME: &str = "Sample overlay";
 /// The sample snappr ships for an orientation, relative to the resource
 /// directory, or `None` when it ships none.
 ///
-/// Only landscape has one, deliberately. One sample is enough to show what an
-/// overlay is and where the `#FF00FF` window goes, and a second drawn to a
-/// different design would suggest the two slots are a matched pair that has to be
-/// kept in step.
+/// Both orientations have one, drawn as one design - the same wordmark over a
+/// full-frame window - so a single `Sample` card means the same thing whichever
+/// slot it is lit for.
 ///
 /// A free function rather than a method because `Orientation` belongs to
 /// `snappr-core` now, and where a *bundle* keeps its resources is not something
@@ -41,17 +40,15 @@ pub const SAMPLE_NAME: &str = "Sample overlay";
 fn sample_for(orientation: Orientation) -> Option<&'static str> {
     match orientation {
         Orientation::Landscape => Some("sample/overlay-landscape.svg"),
-        Orientation::Portrait => None,
+        Orientation::Portrait => Some("sample/overlay-portrait.svg"),
     }
 }
 
 /// What an orientation composites over the crop.
 ///
-/// `Sample` is whatever snappr ships for that slot - which for portrait is
-/// nothing, so a portrait `Sample` prints exactly like `None`. That is the
-/// variant's meaning rather than a hole in it: it keeps the type independent of
-/// which field it sits on, and a portrait sample drawn later is then picked up by
-/// every install that never chose.
+/// `Sample` is whatever snappr ships for that slot, so the variant means the same
+/// thing on either field and a redrawn sample is picked up by every install that
+/// never chose.
 ///
 /// `Custom` remembers the path rather than copying the file, so re-exporting a
 /// design over the same path takes effect on the next photo with no re-picking.
@@ -187,10 +184,9 @@ pub struct Settings {
     pub watch_enabled: bool,
     /// What each orientation composites, picked by the operator from the bar.
     ///
-    /// Landscape starts on the sample that ships with the app; portrait starts on
-    /// nothing, because no portrait sample is drawn. snappr ships **no branding** -
-    /// `sample/` holds one worked example an operator replaces, and the files under
-    /// `share/` are test material that must never be listed in `bundle.resources`.
+    /// Both start on the sample that ships with the app. snappr ships **no
+    /// branding** - `sample/` holds one worked example per orientation, which an
+    /// operator replaces.
     ///
     /// `alias` reads the key the `Option<PathBuf>` build wrote, and the field name
     /// is what gets written back, so the file self-migrates on the first save. The
@@ -254,7 +250,7 @@ impl Default for Settings {
             watch_dir: pipeline.watch_dir,
             watch_enabled: true,
             overlay_landscape: Overlay::Sample,
-            overlay_portrait: Overlay::None,
+            overlay_portrait: Overlay::Sample,
             overlays: vec![Overlay::Sample],
             overlays_collapsed: false,
             extensions: pipeline.extensions,
@@ -469,7 +465,7 @@ mod tests {
     fn an_absent_slot_takes_the_default() {
         let parsed = settings(r#"{"watch_dir": "/tmp/drop"}"#);
         assert_eq!(parsed.overlay_landscape, Overlay::Sample);
-        assert_eq!(parsed.overlay_portrait, Overlay::None);
+        assert_eq!(parsed.overlay_portrait, Overlay::Sample);
     }
 
     /// The shape the `Option<PathBuf>` build wrote, under the key it wrote it as.

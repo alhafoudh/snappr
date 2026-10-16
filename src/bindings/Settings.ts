@@ -10,10 +10,9 @@ watch_enabled: boolean,
 /**
  * What each orientation composites, picked by the operator from the bar.
  *
- * Landscape starts on the sample that ships with the app; portrait starts on
- * nothing, because no portrait sample is drawn. snappr ships **no branding** -
- * `sample/` holds one worked example an operator replaces, and the files under
- * `share/` are test material that must never be listed in `bundle.resources`.
+ * Both start on the sample that ships with the app. snappr ships **no
+ * branding** - `sample/` holds one worked example per orientation, which an
+ * operator replaces.
  *
  * `alias` reads the key the `Option<PathBuf>` build wrote, and the field name
  * is what gets written back, so the file self-migrates on the first save. The

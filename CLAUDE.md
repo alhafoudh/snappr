@@ -16,9 +16,7 @@ exist to protect that property.
 An earlier design ran the whole thing through darktable, with a private configdir,
 a Lua executor inside `darktable-cli`, sqlite bookkeeping, staged film rolls,
 dedupe and a manual operator review pass. It was never implemented and has been
-dropped; `Plans/20260822-snappr-ingest-pipeline.md` and
-`Plans/20260822-snappr-live-ingest.md` remain only as the historical record.
-**Do not reintroduce darktable.**
+dropped. **Do not reintroduce darktable.**
 
 ## Which document owns what
 
@@ -59,7 +57,8 @@ The port is pixel-exact and was checked that way rather than assumed: 15 cases
 captured from the Ruby pipeline (both orientations, 16-bit, Display P3 at 300 dpi,
 EXIF-orientation-6, no overlay, the shipped sample, a moved overlay file) are
 reproduced byte for byte, layout integers and all. `crates/snappr-core/tests/golden.rs`
-is that comparison; it skips itself when `build/goldens` is absent.
+is that comparison; it skips itself when `build/goldens` is absent. One of the 15
+is now `RETIRED` there, because its overlay was a client's branding and is gone.
 
 ## The desktop app
 
@@ -482,14 +481,14 @@ shipped, and the pure tests beside them provably cannot catch this class of bug.
 
 ## The overlay SVGs
 
-**snappr ships no branding, but it does ship one sample.** There are two overlay
+**snappr ships no branding, but it does ship a sample.** There are two overlay
 slots, one per orientation, and each holds one of the overlays in the app's
 **overlay panel** - the operator's library of designs, down the left of the photo.
 Each slot is one of three things, all of them working configurations:
 
 | | what it composites |
 |---|---|
-| **Sample** | `sample/overlay-landscape.svg`, the one overlay in the bundle |
+| **Sample** | `sample/overlay-<orientation>.svg`, the only overlays in the bundle |
 | **Custom** | an SVG the operator added from anywhere on disk |
 | **None** | nothing - the photo is cropped to the print ratio and left alone |
 
@@ -498,16 +497,15 @@ overlay can be live for both. **`None` is not a card**: an orientation with no c
 lit simply has no overlay. See "The overlay panel" in `docs/desktop-app.md` for how
 the cards work and why each one renders a picture.
 
-A fresh install is Sample for landscape and None for portrait. That asymmetry is
-deliberate: only a landscape sample is drawn, so a portrait Sample composites
-nothing and prints exactly like None. Keeping the variant meaningful for both
-orientations is what lets a portrait sample be added later and picked up by every
-install that never chose.
+A fresh install is Sample for both orientations. The sample is one design drawn
+twice - the same wordmark over a full-frame window, at each paper shape - so one
+`Sample` card means the same thing whichever slot it is lit for, and the card's
+picture is drawn from the landscape file.
 
 The sample exists so a first photo shows *something* - an app whose out-of-the-box
 behaviour is "nothing visibly happens" gives the operator nothing to react to -
 and so that whoever draws the real overlay has a worked example. It is a starting
-point, not branding, which is why it lives in `sample/` and not in `share/`.
+point, not branding.
 
 | | frame | branding |
 |---|---|---|
@@ -531,7 +529,7 @@ the same full-frame-window path, with one difference: an SVG *is* being
 composited, so the seam margin applies and the canvas comes out 4px smaller on
 each axis than the plain crop. The photo still fills the entire print and the
 wordmark sits on top of it, over about 1% of the pixels. `overlay_svg.rs`'s tests
-pins the window at exactly `{0, 0, 1, 1}` - a redraw that inset it would silently
+pin both windows at exactly `{0, 0, 1, 1}` - a redraw that inset it would silently
 turn every default print into a bordered one - and `golden.rs` asserts the
 photo survives bit-for-bit under it, which with ~99% clear is the strongest form
 of that check anywhere in the suite.
@@ -594,10 +592,13 @@ Where the settings live and how they reach the pipeline:
   sits outside `src-tauri/` and the list form would land it at `Resources/_up_/`.
   `tauri-build` copies it into `target/debug/` in development too, so
   `BaseDirectory::Resource` finds it in both modes and no fallback is needed.
-- **`share/` is test material, not branding**, and must never be listed in
-  `bundle.resources`. Nothing points at it any more except the tests: it held the
-  overlays the Ruby CLI's config named, and the CLI's config now ships with no
-  overlays at all.
+- **`test/fixtures/` is test material**, and must never be listed in
+  `bundle.resources`.
+
+**No real branding is ever committed.** There used to be a `share/` folder of
+overlays drawn for a real client; it was removed from the whole history before
+the repo went public. Test against fixtures, and keep event designs outside the
+repo - the overlay panel remembers them by path.
 
 `bundle.macOS.frameworks` is the other bundling key, and it carries the 45 dylibs
 of the libvips closure. That list is *generated* - `cargo xtask closure` writes
@@ -615,8 +616,8 @@ all work unmodified. There are three rules:
 2. **Draw at the paper's aspect ratio** - 1.48:1 for landscape, 1:1.48 for
    portrait. The overlay is stretched to fill the frame, so one drawn at the wrong
    shape is silently distorted. `Overlay#warn_on_aspect_mismatch` logs a warning
-   naming the size to redraw at, and `overlay_svg.rs`'s tests asserts the files in
-   `share/` are within 1% of their print ratio.
+   naming the size to redraw at, and `overlay_svg.rs`'s tests assert the shipped
+   samples are within 1% of their print ratio.
 3. **Keep a `viewBox`**, or a `width` and `height` in absolute units. That is what
    `OverlaySvg` scales. Exporters emit one by default.
 
@@ -724,13 +725,10 @@ Re-verify these if libvips is upgraded. They were established empirically.
 - librsvg anti-aliases a shape edge that falls on a fractional coordinate across
   up to three pixels (measured alpha 0, 7, 255 on consecutive rows) - see "Why
   the photo is grown two pixels past the window".
-- Window shapes, measured from the files as they stand: `share/overlay-landscape
-  .svg` marks 74.16% of the width by full height; `sample/overlay-landscape.svg`
-  marks the whole frame, and `overlay_svg.rs`'s tests pins it at exactly
-  `{0, 0, 1, 1}`. Both mark it with a `<path>` under a transform, so geometry
-  parsing would have needed path and transform support. **There is no portrait
-  file in `share/` any more**, though `~/.config/snappr/config.toml` still names one - so
-  the CLI prints portrait photos unbranded.
+- Window shapes, measured from the files as they stand: both `sample/` files
+  mark the whole frame, and `overlay_svg.rs`'s tests pin them at exactly
+  `{0, 0, 1, 1}`. Real exported designs mark it with a `<path>` under a
+  transform, so geometry parsing would have needed path and transform support.
 - `icc_transform` keeps the alpha channel, and maps sRGB white to (255,255,255)
   in Display P3 - so achromatic branding is unaffected while coloured branding is
   corrected.
@@ -863,16 +861,10 @@ THE BUNDLED LIBVIPS (docs/bundled-runtime.md)
   mise.toml                 the entry points operators type
 
 OVERLAYS
-  sample/overlay-landscape.svg  the ONE overlay that ships - the landscape default,
-                                and the only entry in bundle.resources
-  share/*.svg                   overlays for testing - NOT shipped, and never in
-                                bundle.resources
-  share/*.orig.svg              the original hand-written overlays, whose geometry is
-                                percentages inside an absolute viewBox. Kept as a
-                                second dialect to render against - see "Never
-                                overwrite the authored viewBox". Not branding, and
-                                not the current design.
-  test/fixtures/                the same design in several SVG dialects
+  sample/overlay-*.svg          the ONLY overlays that ship - the default for each
+                                orientation, and the only entry in bundle.resources
+  test/fixtures/                the same design in several SVG dialects - NOT
+                                shipped, and never in bundle.resources
 ```
 
 Keep the decision logic in the pipeline and the geometry in the SVGs.
