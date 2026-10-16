@@ -46,6 +46,7 @@
     "resources": { "../sample/*.svg": "sample" },
     "macOS": {
       "minimumSystemVersion": "11.0",
+      "signingIdentity": "-",
       "hardenedRuntime": true,
       "entitlements": "./entitlements.plist"
     }
