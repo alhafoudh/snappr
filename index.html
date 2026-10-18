@@ -10,8 +10,11 @@
     because there is no stylesheet: Radix Themes ships no html/body reset, so
     without margin:0 the 100vh grid overflows by the browser's default 8px.
     The rest says "an app, not a page": nothing here is prose to be selected.
+    The background is the windows' own #111111, so the moment between the page
+    loading and React drawing is dark rather than white - the windows are only
+    shown once the page has loaded, see `show_once_loaded` in lib.rs.
   -->
-  <body style="margin: 0; overflow: hidden; -webkit-user-select: none; user-select: none; cursor: default">
+  <body style="margin: 0; overflow: hidden; background: #111111; -webkit-user-select: none; user-select: none; cursor: default">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

@@ -114,6 +114,18 @@ pub enum Problem {
     NotAFolder { path: PathBuf },
     CannotWatch { path: PathBuf, detail: String },
     BackgroundNotAColour { value: String },
+    // The rest of `PipelineConfig::validate`. One variant per field the settings
+    // window can mark, because the window branches on the code to know which
+    // field to put the sentence under.
+    PaperSizeInvalid { short_mm: f64, long_mm: f64 },
+    CompressionOutOfRange { value: i32 },
+    PreviewSizeInvalid { max_px: i32, thumb_px: i32 },
+    PreviewQualityOutOfRange { value: i32 },
+    StabilityInvalid { checks: u32, timeout_secs: u64 },
+    NoExtensions,
+    PngWatched,
+    OutputSuffixInvalid { value: String, reason: &'static str },
+    CannotExportConfig { path: PathBuf, detail: String },
     ConfigUnreadable { path: PathBuf, detail: String },
     SettingsUnreadable { path: PathBuf, detail: String },
     CannotSaveSettings { detail: String },
@@ -132,6 +144,7 @@ pub enum Problem {
     PrintFileGone,
     PrintUnreadable { path: PathBuf },
     PaperFallback,
+    PrinterMissing { name: String },
     FinderWontOpen { detail: String },
     WindowNotReady { what: &'static str, detail: String },
 
@@ -281,6 +294,55 @@ impl Problem {
                 ),
                 None,
             ),
+            PaperSizeInvalid { short_mm, long_mm } => (
+                "The paper size does not make sense. Both sides have to be more than \
+                 zero, with the short side first."
+                    .into(),
+                Some(format!("short {short_mm} mm, long {long_mm} mm")),
+            ),
+            CompressionOutOfRange { value } => (
+                format!("PNG compression has to be a number from 0 to 9, not {value}."),
+                None,
+            ),
+            PreviewSizeInvalid { max_px, thumb_px } => (
+                "The preview sizes do not make sense. Both have to be more than zero, \
+                 and the thumbnail cannot be bigger than the full preview."
+                    .into(),
+                Some(format!("max {max_px} px, thumb {thumb_px} px")),
+            ),
+            PreviewQualityOutOfRange { value } => (
+                format!("Preview quality has to be a number from 1 to 100, not {value}."),
+                None,
+            ),
+            StabilityInvalid { checks, timeout_secs } => (
+                "Snappr needs at least one check and at least one second to tell \
+                 when a photo has finished arriving."
+                    .into(),
+                Some(format!("checks {checks}, timeout {timeout_secs} s")),
+            ),
+            NoExtensions => (
+                "Pick at least one kind of photo to watch for, or Snappr will never \
+                 notice anything arriving."
+                    .into(),
+                None,
+            ),
+            PngWatched => (
+                "Snappr cannot watch for PNG files, because its own prints are PNG \
+                 files and it would start printing its prints."
+                    .into(),
+                None,
+            ),
+            OutputSuffixInvalid { value, reason } => (
+                format!(
+                    "The ending for print file names cannot be \"{value}\": {reason}. \
+                     Something like .overlay.png works."
+                ),
+                None,
+            ),
+            CannotExportConfig { path, detail } => (
+                format!("Snappr could not save the settings to {}.", name_of(path)),
+                Some(format!("{}: {detail}", path.display())),
+            ),
             ConfigUnreadable { path, detail } => (
                 format!(
                     "Snappr could not read its settings file, so it is using the defaults. \
@@ -351,6 +413,13 @@ impl Problem {
                 "This printer does not have the photo paper Snappr expects, so the print \
                  may come out with a white border. Check Paper Size in the print dialog."
                     .into(),
+                None,
+            ),
+            PrinterMissing { name } => (
+                format!(
+                    "The printer {name} is not connected, so the print dialog opened on \
+                     the default printer. Check the printer in the print dialog."
+                ),
                 None,
             ),
             FinderWontOpen { detail } => {
@@ -424,6 +493,15 @@ impl Problem {
             NotAFolder { .. } => "not_a_folder",
             CannotWatch { .. } => "cannot_watch",
             BackgroundNotAColour { .. } => "background_not_a_colour",
+            PaperSizeInvalid { .. } => "paper_size_invalid",
+            CompressionOutOfRange { .. } => "compression_out_of_range",
+            PreviewSizeInvalid { .. } => "preview_size_invalid",
+            PreviewQualityOutOfRange { .. } => "preview_quality_out_of_range",
+            StabilityInvalid { .. } => "stability_invalid",
+            NoExtensions => "no_extensions",
+            PngWatched => "png_watched",
+            OutputSuffixInvalid { .. } => "output_suffix_invalid",
+            CannotExportConfig { .. } => "cannot_export_config",
             ConfigUnreadable { .. } => "config_unreadable",
             SettingsUnreadable { .. } => "settings_unreadable",
             CannotSaveSettings { .. } => "cannot_save_settings",
@@ -437,6 +515,7 @@ impl Problem {
             PrintFileGone => "print_file_gone",
             PrintUnreadable { .. } => "print_unreadable",
             PaperFallback => "paper_fallback",
+            PrinterMissing { .. } => "printer_missing",
             FinderWontOpen { .. } => "finder_wont_open",
             WindowNotReady { .. } => "window_not_ready",
             DropAlreadyAPrint { .. } => "drop_already_a_print",

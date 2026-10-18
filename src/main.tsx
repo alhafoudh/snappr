@@ -1,9 +1,16 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { Theme } from "@radix-ui/themes";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import "@radix-ui/themes/styles.css";
 
 import App from "./App";
+import { SettingsWindow } from "./components/SettingsWindow";
+
+// Two windows, one bundle. The settings window is built by Rust on demand with
+// the label "settings" (`open_settings_window` in lib.rs), and loads the same
+// index.html - so the label is what decides which of the two this is.
+const isSettings = getCurrentWindow().label === "settings";
 
 // The only stylesheet in the app is Radix's own. Everything this UI looks like
 // comes from Theme tokens and component props - there is no app.css, by design.
@@ -24,7 +31,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
       scaling="95%"
       panelBackground="solid"
     >
-      <App />
+      {isSettings ? <SettingsWindow /> : <App />}
     </Theme>
   </React.StrictMode>,
 );

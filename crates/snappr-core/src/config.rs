@@ -152,8 +152,77 @@ impl PipelineConfig {
     /// Forces every value that is only checked when it is used, so a bad colour
     /// or a nonsense paper size is a startup failure rather than a surprise on
     /// some later photo.
+    ///
+    /// **Both front ends answer to this**: the CLI when it loads its TOML, the app
+    /// when the settings window saves. The app's settings were never validated at
+    /// all while the only way to change them was a hand-edited JSON file; now that
+    /// a form can write every one of them, this is the gate.
     pub fn validate(&self) -> Result<(), Problem> {
         self.background_rgb()?;
+
+        let (short, long) = (self.print_short_mm, self.print_long_mm);
+        if !(short.is_finite() && long.is_finite() && short > 0.0 && short <= long) {
+            return Err(Problem::PaperSizeInvalid { short_mm: short, long_mm: long });
+        }
+        if !(0..=9).contains(&self.png_compression) {
+            return Err(Problem::CompressionOutOfRange { value: self.png_compression });
+        }
+        if self.preview_thumb_px <= 0 || self.preview_max_px < self.preview_thumb_px {
+            return Err(Problem::PreviewSizeInvalid {
+                max_px: self.preview_max_px,
+                thumb_px: self.preview_thumb_px,
+            });
+        }
+        if !(1..=100).contains(&self.preview_quality) {
+            return Err(Problem::PreviewQualityOutOfRange { value: self.preview_quality });
+        }
+        if self.stability_checks == 0 || self.stability_timeout_secs == 0 {
+            return Err(Problem::StabilityInvalid {
+                checks: self.stability_checks,
+                timeout_secs: self.stability_timeout_secs,
+            });
+        }
+        self.validate_watch_rules()
+    }
+
+    /// The self-output guard, enforced rather than hoped for.
+    ///
+    /// The print lands in the folder being watched, so the one thing that must
+    /// never happen is a print that the watcher would take for a photo - that is
+    /// the `IMG_1234.overlay.overlay.jpg` loop described under "The self-output
+    /// guard" in CLAUDE.md. Two rules close it between them: **the suffix always
+    /// ends in `.png`** (which is also the lossless invariant, since libvips picks
+    /// its saver from the extension and anything else would be JPEG or worse),
+    /// and **`png` is never a watched extension**. Each alone leaves a gap.
+    ///
+    /// The marker before `.png` is required so the guard still has something
+    /// distinctive to match on: a bare `.png` suffix would name the print
+    /// `IMG_1234.png` and the guard would skip every PNG in the folder.
+    fn validate_watch_rules(&self) -> Result<(), Problem> {
+        if self.extensions.is_empty() {
+            return Err(Problem::NoExtensions);
+        }
+        if self.extensions.iter().any(|ext| ext.eq_ignore_ascii_case("png")) {
+            return Err(Problem::PngWatched);
+        }
+
+        let suffix = &self.output_suffix;
+        let invalid = |reason: &'static str| {
+            Err(Problem::OutputSuffixInvalid { value: suffix.clone(), reason })
+        };
+        if suffix.trim() != suffix {
+            return invalid("it starts or ends with a space");
+        }
+        if suffix.contains('/') {
+            return invalid("it contains a /");
+        }
+        let lower = suffix.to_ascii_lowercase();
+        let Some(marker) = lower.strip_suffix(".png") else {
+            return invalid("it has to end in .png");
+        };
+        if marker.is_empty() {
+            return invalid("it needs something before .png, like .overlay.png");
+        }
         Ok(())
     }
 }
@@ -192,7 +261,7 @@ pub fn resolve(value: &str, base: &Path) -> PathBuf {
 /// missing file is a normal, fully working configuration** - `snappr overlay
 /// photo.heic` works on a machine that has never been configured. That is what
 /// makes it safe for `load` to treat "no file" as success.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigFile {
     watch_dir: Option<String>,
@@ -207,14 +276,14 @@ struct ConfigFile {
     overlay: Option<OverlayTable>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct PrintTable {
     short_mm: Option<f64>,
     long_mm: Option<f64>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct PreviewTable {
     max_px: Option<i32>,
@@ -222,14 +291,14 @@ struct PreviewTable {
     quality: Option<i32>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct StabilityTable {
     checks: Option<u32>,
     timeout_secs: Option<u64>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct OverlayTable {
     landscape: Option<String>,
@@ -328,6 +397,42 @@ pub fn load(path: &Path) -> Result<PipelineConfig, Problem> {
     Ok(config)
 }
 
+/// `config` written out as the CLI's config file, every key spelled out.
+///
+/// The app's way of handing its settings to `mise run overlay`. **One-way on
+/// purpose**: the app never reads this file back, for the reason in the module
+/// comment. Paths are written absolute, so the file means the same thing
+/// wherever it is saved, and `load` reads back exactly `config`.
+pub fn to_toml(config: &PipelineConfig) -> String {
+    let path = |path: &Path| path.display().to_string();
+    let file = ConfigFile {
+        watch_dir: Some(path(&config.watch_dir)),
+        extensions: Some(config.extensions.clone()),
+        output_suffix: Some(config.output_suffix.clone()),
+        background: Some(config.background.clone()),
+        png_compression: Some(config.png_compression),
+        open_after: Some(config.open_after),
+        print: Some(PrintTable {
+            short_mm: Some(config.print_short_mm),
+            long_mm: Some(config.print_long_mm),
+        }),
+        preview: Some(PreviewTable {
+            max_px: Some(config.preview_max_px),
+            thumb_px: Some(config.preview_thumb_px),
+            quality: Some(config.preview_quality),
+        }),
+        stability: Some(StabilityTable {
+            checks: Some(config.stability_checks),
+            timeout_secs: Some(config.stability_timeout_secs),
+        }),
+        overlay: Some(OverlayTable {
+            landscape: config.overlay_landscape.as_deref().map(path),
+            portrait: config.overlay_portrait.as_deref().map(path),
+        }),
+    };
+    toml::to_string(&file).expect("the config file shape always serialises")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,6 +510,79 @@ mod tests {
         // A relative overlay resolves against the config file, not the cwd.
         assert_eq!(config.overlay_landscape.unwrap(), dir.join("designs/event.svg"));
         assert!(config.overlay_portrait.is_none());
+    }
+
+    #[test]
+    fn the_defaults_are_valid() {
+        PipelineConfig::default().validate().unwrap();
+    }
+
+    fn refused(config: PipelineConfig) -> &'static str {
+        config.validate().unwrap_err().code()
+    }
+
+    #[test]
+    fn every_number_out_of_range_is_refused_by_its_own_code() {
+        let base = PipelineConfig::default;
+        assert_eq!(refused(PipelineConfig { print_short_mm: 0.0, ..base() }), "paper_size_invalid");
+        assert_eq!(
+            refused(PipelineConfig { print_short_mm: 150.0, ..base() }),
+            "paper_size_invalid",
+            "the short side has to be the short one"
+        );
+        assert_eq!(refused(PipelineConfig { png_compression: 10, ..base() }), "compression_out_of_range");
+        assert_eq!(refused(PipelineConfig { preview_thumb_px: 0, ..base() }), "preview_size_invalid");
+        assert_eq!(refused(PipelineConfig { preview_max_px: 300, ..base() }), "preview_size_invalid");
+        assert_eq!(refused(PipelineConfig { preview_quality: 0, ..base() }), "preview_quality_out_of_range");
+        assert_eq!(refused(PipelineConfig { stability_checks: 0, ..base() }), "stability_invalid");
+        assert_eq!(refused(PipelineConfig { stability_timeout_secs: 0, ..base() }), "stability_invalid");
+    }
+
+    #[test]
+    fn the_watcher_can_never_be_handed_its_own_prints() {
+        let base = PipelineConfig::default;
+        assert_eq!(refused(PipelineConfig { extensions: vec![], ..base() }), "no_extensions");
+        assert_eq!(
+            refused(PipelineConfig { extensions: vec!["jpg".into(), "PNG".into()], ..base() }),
+            "png_watched"
+        );
+        for suffix in [".print.jpg", ".png", "x/y.png", " .overlay.png", ".overlay.png "] {
+            assert_eq!(
+                refused(PipelineConfig { output_suffix: suffix.into(), ..base() }),
+                "output_suffix_invalid",
+                "{suffix:?} should be refused"
+            );
+        }
+        for suffix in [".snappr.png", "-print.PNG", "_branded.png"] {
+            PipelineConfig { output_suffix: suffix.into(), ..base() }
+                .validate()
+                .unwrap_or_else(|p| panic!("{suffix:?} should be accepted: {}", p.ui()));
+        }
+    }
+
+    #[test]
+    fn the_exported_file_reads_back_as_the_same_config() {
+        let dir = std::env::temp_dir().join(format!("snappr-config-export-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        let config = PipelineConfig {
+            watch_dir: dir.clone(),
+            extensions: vec!["heic".into(), "jpg".into()],
+            output_suffix: ".snappr.png".into(),
+            background: "#102030".into(),
+            print_short_mm: 101.6,
+            print_long_mm: 152.4,
+            preview_quality: 70,
+            stability_timeout_secs: 45,
+            open_after: false,
+            overlay_landscape: Some(dir.join("event-landscape.svg")),
+            overlay_portrait: None,
+            ..Default::default()
+        };
+        std::fs::write(&path, to_toml(&config)).unwrap();
+
+        assert_eq!(load(&path).unwrap(), config);
     }
 
     #[test]

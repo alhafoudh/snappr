@@ -511,34 +511,43 @@ impl Overlay {
         orientation: Orientation,
         warnings: &mut Vec<Warning>,
     ) {
-        let Ok(Some(drawn)) = overlay_svg::aspect_ratio(svg, Some(&orientation.slot())) else {
-            return;
-        };
-        let wanted = self.config.print_ratio(orientation);
-        if (drawn - wanted).abs() <= wanted * 0.01 {
-            return;
+        if let Some(problem) = aspect_mismatch(&self.config, svg, orientation) {
+            warn_into(Some(warnings), problem);
         }
-
-        // 20 px per mm, about 508 dpi - a size worth redrawing at, not the size
-        // of any particular print.
-        let (width, height) = match orientation {
-            Orientation::Landscape => (self.config.print_long_mm, self.config.print_short_mm),
-            Orientation::Portrait => (self.config.print_short_mm, self.config.print_long_mm),
-        };
-
-        warn_into(
-            Some(warnings),
-            Problem::AspectMismatch {
-                slot: orientation.slot(),
-                file: name_of(svg),
-                width: (width * 20.0).round() as i32,
-                height: (height * 20.0).round() as i32,
-                drawn,
-                wanted,
-                orientation: orientation.as_str(),
-            },
-        );
     }
+}
+
+/// Whether `svg` was drawn at a different shape from the paper `config` prints on,
+/// as the problem to report, or `None` when it matches within 1%.
+///
+/// Free rather than a method so the settings window can ask it about a paper the
+/// operator has picked but not saved yet - which is the moment the answer is
+/// still cheap to act on.
+pub fn aspect_mismatch(config: &PipelineConfig, svg: &Path, orientation: Orientation) -> Option<Problem> {
+    let Ok(Some(drawn)) = overlay_svg::aspect_ratio(svg, Some(&orientation.slot())) else {
+        return None;
+    };
+    let wanted = config.print_ratio(orientation);
+    if (drawn - wanted).abs() <= wanted * 0.01 {
+        return None;
+    }
+
+    // 20 px per mm, about 508 dpi - a size worth redrawing at, not the size
+    // of any particular print.
+    let (width, height) = match orientation {
+        Orientation::Landscape => (config.print_long_mm, config.print_short_mm),
+        Orientation::Portrait => (config.print_short_mm, config.print_long_mm),
+    };
+
+    Some(Problem::AspectMismatch {
+        slot: orientation.slot(),
+        file: name_of(svg),
+        width: (width * 20.0).round() as i32,
+        height: (height * 20.0).round() as i32,
+        drawn,
+        wanted,
+        orientation: orientation.as_str(),
+    })
 }
 
 /// A box of the target ratio inscribed in `width` x `height`, centred.

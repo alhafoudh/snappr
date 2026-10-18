@@ -353,6 +353,77 @@ impl Settings {
         self.overlays = library;
     }
 
+    /// Takes every field the settings window edits from `form`, and nothing else.
+    ///
+    /// **The overlay slots, the library, the watch toggle and the panel's collapsed
+    /// state are deliberately not on that list.** They belong to controls in the
+    /// main window, which save the moment they are clicked, and the settings window
+    /// holds a copy loaded when it opened. Taking the whole form would let a stale
+    /// copy put back an overlay the operator had just switched off in the panel -
+    /// and print with it.
+    pub fn take_editable(&mut self, form: Settings) {
+        self.watch_dir = form.watch_dir;
+        self.extensions = form
+            .extensions
+            .iter()
+            .map(|ext| ext.trim().trim_start_matches('.').to_ascii_lowercase())
+            .collect();
+        self.output_suffix = form.output_suffix;
+        self.background = form.background.trim().to_string();
+        self.png_compression = form.png_compression;
+        self.print_short_mm = form.print_short_mm;
+        self.print_long_mm = form.print_long_mm;
+        self.preview_max_px = form.preview_max_px;
+        self.preview_thumb_px = form.preview_thumb_px;
+        self.preview_quality = form.preview_quality;
+        self.stability_checks = form.stability_checks;
+        self.stability_timeout_secs = form.stability_timeout_secs;
+        self.printer = form.printer;
+        self.print_paper_name = form.print_paper_name;
+    }
+
+    /// Whether a change from `before` to `self` needs the watch restarting.
+    ///
+    /// The watcher copies its config when it starts (see `watcher::spawn`), so
+    /// every one of these is frozen into a running watch until it is replaced.
+    pub fn watch_changed(&self, before: &Settings) -> bool {
+        self.watch_dir != before.watch_dir
+            || self.extensions != before.extensions
+            || self.output_suffix != before.output_suffix
+            || self.stability_checks != before.stability_checks
+            || self.stability_timeout_secs != before.stability_timeout_secs
+    }
+
+    /// Whether a change from `before` to `self` makes the prints already on the
+    /// strip out of date, so they have to be made again.
+    ///
+    /// The paper and the background change the print itself. The preview sizes
+    /// change only what the window draws, but those files are only ever written
+    /// as part of making a print, so they ride along. Compression is not here:
+    /// it changes the file size and the time taken, never a pixel.
+    pub fn prints_changed(&self, before: &Settings) -> bool {
+        self.background != before.background
+            || self.paper_changed(before)
+            || self.preview_max_px != before.preview_max_px
+            || self.preview_thumb_px != before.preview_thumb_px
+            || self.preview_quality != before.preview_quality
+    }
+
+    /// What the print dialog is set up with.
+    #[cfg(target_os = "macos")]
+    pub fn print_setup(&self) -> crate::mac::PrintSetup {
+        crate::mac::PrintSetup {
+            printer: self.printer.clone(),
+            paper: self.print_paper_name.clone(),
+            short_mm: self.print_short_mm,
+            long_mm: self.print_long_mm,
+        }
+    }
+
+    pub fn paper_changed(&self, before: &Settings) -> bool {
+        self.print_short_mm != before.print_short_mm || self.print_long_mm != before.print_long_mm
+    }
+
     pub fn path(app: &AppHandle) -> Result<PathBuf, Payload> {
         let dir = app
             .path()
@@ -640,5 +711,50 @@ mod tests {
 
         assert!(!parsed.add_overlay(brand.clone()), "the same file must not make a second card");
         assert_eq!(parsed.overlays.len(), 2);
+    }
+
+    /// The settings window holds a copy loaded when it opened. Saving it must not
+    /// put back an overlay the operator switched off in the panel since then.
+    #[test]
+    fn saving_the_settings_window_leaves_the_panel_alone() {
+        let mut live = loaded("{}");
+        let stale_form = live.clone();
+
+        // While the window was open, the operator switched landscape off and
+        // paused the watch from the main window.
+        live.overlay_landscape = Overlay::None;
+        live.watch_enabled = false;
+        live.overlays_collapsed = true;
+
+        let mut form = stale_form;
+        form.background = " #102030 ".into();
+        form.extensions = vec![".HEIC".into(), "jpg".into()];
+        form.print_paper_name = "4x6.Fullbleed".into();
+        live.take_editable(form);
+
+        assert_eq!(live.background, "#102030");
+        assert_eq!(live.extensions, ["heic", "jpg"]);
+        assert_eq!(live.print_paper_name, "4x6.Fullbleed");
+        assert_eq!(live.overlay_landscape, Overlay::None, "the stale form must not re-light a slot");
+        assert!(!live.watch_enabled && live.overlays_collapsed);
+    }
+
+    #[test]
+    fn only_what_the_prints_show_makes_them_again() {
+        let before = loaded("{}");
+
+        let mut compressed = before.clone();
+        compressed.png_compression = 9;
+        assert!(!compressed.prints_changed(&before), "compression changes no pixel");
+
+        let mut paper = before.clone();
+        paper.print_long_mm = 152.4;
+        assert!(paper.prints_changed(&before) && paper.paper_changed(&before));
+        assert!(!paper.watch_changed(&before));
+
+        let mut suffix = before.clone();
+        suffix.output_suffix = ".snappr.png".into();
+        assert!(suffix.watch_changed(&before), "the guard lives in the running watcher");
+        assert!(!suffix.prints_changed(&before));
     }
 }

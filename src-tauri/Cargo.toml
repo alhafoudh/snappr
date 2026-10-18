@@ -1,6 +1,6 @@
 [package]
 name = "snappr"
-version = "0.1.0"
+version = "0.2.0"
 description = "AirDrop-to-print kiosk"
 authors = ["Freevision s.r.o."]
 license = "MIT"
@@ -54,7 +54,7 @@ objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSArray", "NSGeometry", "NSString", "NSURL", "NSObject"] }
 objc2-app-kit = { version = "0.3", features = [
   "NSImage", "NSImageView", "NSImageCell", "NSControl", "NSView", "NSResponder", "NSWindow",
-  "NSPrintInfo", "NSPrintOperation", "NSPrintPanel", "NSSharingService", "NSGraphics",
+  "NSPrintInfo", "NSPrintOperation", "NSPrintPanel", "NSPrinter", "NSSharingService", "NSGraphics",
 ] }
 
 # [profile.release] lives in the workspace root now - cargo ignores profiles on a

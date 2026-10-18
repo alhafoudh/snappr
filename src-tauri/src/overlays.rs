@@ -110,16 +110,23 @@ pub fn dir(app: &AppHandle) -> Result<PathBuf, Payload> {
     Ok(dir)
 }
 
-/// Path and mtime, hashed to something short and filename-safe.
+/// Path, mtime and paper size, hashed to something short and filename-safe.
 ///
 /// Not a cryptographic hash: nothing here is adversarial, and the only thing the
-/// key has to do is change when the file does. `DefaultHasher` is deterministic
+/// key has to do is change when the card would. `DefaultHasher` is deterministic
 /// for a given build, so the PNGs survive a restart; a Rust upgrade that changed
 /// the algorithm would re-render every card once and collect the old files, which
 /// is a cost of nothing.
-fn key_for(path: &Path) -> String {
+///
+/// **The paper is in the key** because a card's shape and its "drawn at the
+/// wrong shape" warning both come from the print ratio. Without it, choosing a
+/// different paper in the settings window left every card claiming the old one
+/// fitted.
+fn key_for(path: &Path, settings: &Settings) -> String {
     let mut hasher = DefaultHasher::new();
     path.hash(&mut hasher);
+    settings.print_short_mm.to_bits().hash(&mut hasher);
+    settings.print_long_mm.to_bits().hash(&mut hasher);
     // Nanoseconds, like Preview's key: a design re-exported twice inside one
     // second is exactly the case a coarser stamp cannot tell apart.
     std::fs::metadata(path)
@@ -146,7 +153,7 @@ fn resolved(app: &AppHandle, settings: &Settings) -> Vec<(Overlay, PathBuf, Stri
             // whose card is drawn from its landscape file.
             let path = overlay.resolve(app, Orientation::Landscape)?;
             path.is_file().then(|| {
-                let key = key_for(&path);
+                let key = key_for(&path, settings);
                 (overlay.clone(), path, key)
             })
         })
@@ -168,7 +175,7 @@ pub fn cards(app: &AppHandle, settings: &Settings) -> Vec<OverlayCard> {
             let assigned = settings.assigned(overlay);
             let path = overlay.resolve(app, Orientation::Landscape);
             let missing = path.as_ref().map_or(true, |path| !path.is_file());
-            let render = path.as_ref().filter(|_| !missing).and_then(|path| cache.get(&key_for(path)));
+            let render = path.as_ref().filter(|_| !missing).and_then(|path| cache.get(&key_for(path, settings)));
 
             OverlayCard {
                 name: overlay.label(),

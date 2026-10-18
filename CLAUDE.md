@@ -76,6 +76,11 @@ Two things about it belong here, because they change what the pipeline may assum
   its settings on every toggle while the TOML is hand-edited.
 - **The app is stateful where the pipeline is not** - see the end of
   Architecture below.
+- **Every pipeline setting is editable from the app**, in a settings window
+  (Snappr > Settings..., Cmd+,), and a save goes through the same
+  `PipelineConfig::validate` the CLI runs on its TOML. The paper size is no longer
+  a constant anyone can assume: it is whatever paper the operator picked from
+  their printer, and changing it makes the strip again.
 
 Run it with `npm run tauri dev` (Vite on a fixed port 5183). A debug build links
 Homebrew's libvips if `cargo xtask libvips` has never run, so the app comes up on
@@ -317,6 +322,14 @@ Keep the guard. It was load-bearing when the output was `.overlay.jpg` - without
 it the watcher fed on itself, producing `IMG_1234.overlay.overlay.jpg` and on
 forever - and it becomes load-bearing again the moment anyone adds `png` to
 `extensions` or changes the output format back.
+
+**Both of those are now refused rather than hoped against**, because the
+settings window can edit `extensions` and `output_suffix` and the CLI's TOML
+always could. `PipelineConfig::validate` requires the suffix to end in `.png`
+(which is also the lossless rule - libvips picks its saver from the extension),
+to have a marker before it, and `png` never to be a watched extension. Each rule
+alone leaves a gap; together they make the loop unreachable from any setting.
+`the_watcher_can_never_be_handed_its_own_prints` in `config.rs` is the guard.
 
 **Previews never go in the drop folder**, and this one is not belt and braces -
 it is the sharper version of the guard above. The app derives three preview JPEGs

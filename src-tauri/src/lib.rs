@@ -24,9 +24,21 @@ use std::sync::Mutex;
 use snappr_core::overlay::Overlay as Pipeline;
 use snappr_core::watcher::{self, Arrival, Refusal};
 use snappr_core::worker::Worker;
-use tauri::{AppHandle, DragDropEvent, Emitter, Manager, State, WebviewWindow, WindowEvent};
+use tauri::menu::{Menu, MenuItem, MenuItemKind, PredefinedMenuItem};
+use tauri::{
+    AppHandle, DragDropEvent, Emitter, Manager, State, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder, WindowEvent,
+};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_window_state::StateFlags;
+
+/// The label of the one window declared in `tauri.conf.json`.
+const MAIN_WINDOW: &str = "main";
+/// The label of the settings window, which is built on demand. `main.tsx` reads
+/// it to decide what to render, and `capabilities/default.json` lists it.
+const SETTINGS_WINDOW: &str = "settings";
+/// The id of the app menu's Settings item.
+const SETTINGS_MENU_ID: &str = "settings";
 
 use overlays::OverlayCard;
 use photo::{Index, Photo, Status};
@@ -436,7 +448,7 @@ fn explain_refusals(app: &AppHandle, refused: Vec<(PathBuf, Refusal)>) {
     // Dock icon can be what *launches* the app, though, so there is not always a
     // window to hang one from - unparented then, which is the old behaviour and
     // the only thing available.
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
         dialog = dialog.parent(&window);
     }
 
@@ -568,6 +580,223 @@ fn set_selected(app: AppHandle, state: State<AppState>, source: PathBuf) -> Resu
 #[tauri::command]
 fn get_settings(state: State<AppState>) -> Settings {
     state.settings.lock().unwrap().clone()
+}
+
+/// What a fresh install starts with, for the settings window's Reset buttons.
+///
+/// From `Settings::default`, which derives every pipeline value from
+/// `PipelineConfig::default` - so Reset cannot drift from the one defaults table.
+#[tauri::command]
+fn default_settings() -> Settings {
+    Settings::default()
+}
+
+/// Saves the settings window, and does whatever the change needs doing.
+///
+/// **Only the fields that window edits are taken** - see `take_editable` for why
+/// the overlay slots and the watch toggle are not. Everything is validated before
+/// anything is saved, through the same `validate` the CLI runs on its TOML, so a
+/// value the pipeline would refuse later is refused here, under the field that
+/// caused it.
+///
+/// Then, by what actually changed:
+/// - the watch settings restart the watcher, which froze its copy when it started
+/// - the paper redraws the overlay cards, whose shape and warnings follow it
+/// - the paper, background and preview settings make every print on the strip
+///   again, because the operator decided a strip of prints that no longer match
+///   the settings is worse than the time it takes
+///
+/// The `settings` event goes to every window, so the main window's panel picks up
+/// the new background without reloading.
+#[tauri::command]
+fn save_settings(app: AppHandle, state: State<AppState>, form: Settings) -> Result<Settings, Payload> {
+    if !form.watch_dir.is_dir() {
+        return Err(Problem::NotAFolder { path: form.watch_dir }.say());
+    }
+
+    let (before, updated) = {
+        let mut settings = state.settings.lock().unwrap();
+        let before = settings.clone();
+        let mut candidate = before.clone();
+        candidate.take_editable(form);
+        candidate.pipeline_config(&app).validate().map_err(Problem::say)?;
+        candidate.save(&app)?;
+        *settings = candidate.clone();
+        (before, candidate)
+    };
+    log::info!("settings saved from the settings window");
+    let _ = app.emit("settings", &updated);
+
+    if updated.paper_changed(&before) {
+        overlays::announce(&app);
+        overlays::refresh(app.clone());
+    }
+    if updated.prints_changed(&before) {
+        remake_all(&app);
+    }
+    // Last, because it is the one step that can fail after the save: the settings
+    // are already on disk, and the error says why the watch is not running.
+    if updated.watch_enabled && updated.watch_changed(&before) {
+        start_watching_noted(&app, &updated)?;
+    }
+    Ok(updated)
+}
+
+/// Makes every print on the strip again with the settings as they are now.
+///
+/// One thread walking the strip in order, not a thread per photo: the worker runs
+/// one composite at a time anyway, and a strip of two hundred photos should not
+/// be two hundred parked threads.
+///
+/// A photo that is mid-composite is included. It finishes with the old settings,
+/// and then this makes it again - so the strip ends up consistent, at the cost of
+/// one extra composite.
+fn remake_all(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let sources: Vec<PathBuf> = {
+        let mut index = state.index.lock().unwrap();
+        let sources: Vec<PathBuf> = index.all().iter().map(|photo| photo.source.clone()).collect();
+        for source in &sources {
+            // Queued is what lets `process` past its "already handled" early
+            // return - the same trick `reprocess` uses for one photo.
+            index.update(source, |photo| {
+                photo.status = Status::Queued;
+                photo.error = None;
+            });
+        }
+        sources
+    };
+    if sources.is_empty() {
+        return;
+    }
+
+    log::info!("making {} print(s) again with the new settings", sources.len());
+    let app = app.clone();
+    std::thread::spawn(move || {
+        for source in sources {
+            process(app.clone(), source);
+        }
+    });
+}
+
+/// Which overlays in use would print stretched on a paper of this size, as the
+/// sentences the photo would carry.
+///
+/// Asked while the operator is still choosing, so the warning arrives before the
+/// strip is made again on the wrong shape rather than on every print after.
+/// Only the two slots: an overlay in the panel that is not switched on prints
+/// nothing, so its shape does not matter yet.
+#[tauri::command]
+fn check_overlay_shapes(app: AppHandle, state: State<AppState>, short_mm: f64, long_mm: f64) -> Vec<String> {
+    let mut settings = state.settings.lock().unwrap().clone();
+    settings.print_short_mm = short_mm;
+    settings.print_long_mm = long_mm;
+    let config = settings.pipeline_config(&app);
+    Orientation::ALL
+        .into_iter()
+        .filter_map(|orientation| {
+            let svg = config.overlay(orientation)?;
+            snappr_core::overlay::aspect_mismatch(&config, svg, orientation)
+        })
+        .map(|problem| problem.ui())
+        .collect()
+}
+
+/// Every printer this Mac knows. `async` because a network printer that is
+/// asleep can take a moment to answer, and a sync command runs on the main thread.
+#[tauri::command]
+async fn list_printers() -> Vec<mac::Printer> {
+    mac::printers()
+}
+
+/// The papers one printer offers - `""` for the system default.
+#[tauri::command]
+async fn list_papers(printer: String) -> Vec<mac::Paper> {
+    mac::papers(&printer)
+}
+
+/// Opens the settings window, or brings it forward if it is already open.
+#[tauri::command]
+fn open_settings(app: AppHandle) {
+    open_settings_window(&app);
+}
+
+/// A second window rather than a dialog inside the first, for two reasons.
+/// "Modals" in docs/desktop-app.md allows a modal for exactly two things and
+/// settings are neither; and at an event the filmstrip has to keep showing
+/// arrivals while someone is changing the paper.
+///
+/// Built here rather than declared in `tauri.conf.json`, because a declared window
+/// opens at launch. Same bundle, same `index.html` - `main.tsx` picks what to
+/// render from the window's label.
+fn open_settings_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(SETTINGS_WINDOW) {
+        let _ = window.set_focus();
+        return;
+    }
+    let built = WebviewWindowBuilder::new(app, SETTINGS_WINDOW, WebviewUrl::App("index.html".into()))
+        .title("Snappr Settings")
+        .inner_size(600.0, 620.0)
+        .resizable(false)
+        .minimizable(false)
+        .maximizable(false)
+        // The app is dark-only. Without this the titlebar follows the system and
+        // a light Mac gets a white strip over a dark window.
+        .theme(Some(tauri::Theme::Dark))
+        .background_color(tauri::window::Color(0x11, 0x11, 0x11, 0xff))
+        .zoom_hotkeys_enabled(false)
+        // Hidden until its page has loaded - see `show_once_loaded`.
+        .visible(false)
+        .center()
+        .build();
+    if let Err(e) = built {
+        log::error!("cannot open the settings window: {e}");
+    }
+}
+
+/// Writes the settings out as a config file for the command line.
+///
+/// One-way on purpose: the app never reads that file. Offered at the CLI's own
+/// location when its folder exists, so saving over it is one click - and the save
+/// panel is what asks before replacing a file that is already there.
+#[tauri::command]
+async fn export_cli_config(window: WebviewWindow) -> Result<Option<PathBuf>, Payload> {
+    let app = window.app_handle().clone();
+    let mut config = app.state::<AppState>().settings.lock().unwrap().pipeline_config(&app);
+    // The app forces this off only because it draws the print in its own window.
+    // From a terminal, opening the print is the whole of the CLI's output.
+    config.open_after = true;
+
+    let usual = snappr_core::config::config_path(None);
+    let mut dialog = window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .add_filter("TOML", &["toml"])
+        .set_file_name("config.toml");
+    if let Some(dir) = usual.parent().filter(|dir| dir.is_dir()) {
+        dialog = dialog.set_directory(dir);
+    }
+    let Some(path) = dialog.blocking_save_file().and_then(|p| p.into_path().ok()) else {
+        return Ok(None);
+    };
+
+    std::fs::write(&path, snappr_core::config::to_toml(&config))
+        .map_err(|e| Problem::CannotExportConfig { path: path.clone(), detail: detail(e) }.say())?;
+    log::info!("exported the settings to {}", path.display());
+    Ok(Some(path))
+}
+
+/// Shows `settings.json` in Finder - or its folder, on an install that has never
+/// saved one.
+#[tauri::command]
+fn reveal_settings_file(app: AppHandle) -> Result<(), Payload> {
+    let path = Settings::path(&app)?;
+    if path.exists() {
+        reveal(&path)
+    } else {
+        reveal(path.parent().unwrap_or(&path))
+    }
 }
 
 /// Changing the watch directory restarts the watch in place, so the operator does
@@ -946,15 +1175,24 @@ fn share_photo(
 ///
 /// After `mac::print` rather than before: a dispatch that never reached the main
 /// thread put nothing on screen, so it should mark nothing either.
+///
+/// `setup` is the settings window's Test Print: the printer and paper the
+/// operator has picked but not saved, so they can see the borderless result
+/// before committing to it. Without it, the saved settings are used.
 #[tauri::command]
-fn print_photo(window: WebviewWindow, state: State<AppState>, source: PathBuf) -> Result<(), Payload> {
+fn print_photo(
+    window: WebviewWindow,
+    state: State<AppState>,
+    source: PathBuf,
+    setup: Option<mac::PrintSetup>,
+) -> Result<(), Payload> {
     let (destination, landscape) = destination_of(&state, &source)?;
-    let paper = state.settings.lock().unwrap().print_paper_name.clone();
+    let setup = setup.unwrap_or_else(|| state.settings.lock().unwrap().print_setup());
     // The job is named after the SOURCE, not the PNG being printed: the
     // destination's stem is `IMG_1234.overlay`, and the operator thinks of the
     // print as the photo they dropped.
     let title = source.file_stem().unwrap_or_default().to_string_lossy();
-    mac::print(&window, &destination, landscape, &paper, &title)?;
+    mac::print(&window, &destination, landscape, &setup, &title)?;
     set_printed(window.app_handle(), &source, true)
 }
 
@@ -1060,13 +1298,61 @@ async fn pick_overlay_file(window: WebviewWindow) -> Option<PathBuf> {
         .and_then(|p| p.into_path().ok())
 }
 
+/// Shows a window once its page has loaded.
+///
+/// **Both windows are created hidden** - `"visible": false` in `tauri.conf.json`
+/// for the main one, `.visible(false)` at the builder for settings - and this is
+/// what shows them. Without it each one opened white and then went dark.
+///
+/// `backgroundColor: "#111111"` reads like it should already prevent that, and on
+/// macOS it does not: it colours the *window*, but WKWebView paints its own white
+/// background over it until the first page draws, and wry only turns that off
+/// when built with its `transparent` feature. By `Finished` the document has
+/// loaded, and `index.html` gives the body the same `#111111`, so whatever is on
+/// screen from here on is dark - at worst an empty dark frame for the moment
+/// before React draws.
+///
+/// From Rust rather than from the page, so a frontend that fails to load still
+/// gets a window instead of an app with nothing on screen. `show` on a window that
+/// is already visible does nothing, so a reload in development is harmless.
+fn show_once_loaded(webview: &tauri::Webview, payload: &tauri::webview::PageLoadPayload<'_>) {
+    if payload.event() == tauri::webview::PageLoadEvent::Finished {
+        if let Err(e) = webview.window().show() {
+            log::error!("cannot show the {} window: {e}", webview.label());
+        }
+    }
+}
+
+/// Tauri's default menu, with Settings… where every Mac app keeps it: in the app
+/// menu, under About, on Cmd+,.
+///
+/// The default rather than one built from scratch, because it already carries
+/// Edit (without which Cmd+C and Cmd+V do nothing in the settings window's fields)
+/// and Window, and rebuilding those by hand is a way to lose one.
+fn install_menu(app: &AppHandle) -> tauri::Result<()> {
+    let menu = Menu::default(app)?;
+    if let Some(MenuItemKind::Submenu(app_menu)) = menu.items()?.into_iter().next() {
+        let settings = MenuItem::with_id(app, SETTINGS_MENU_ID, "Settings…", true, Some("CmdOrCtrl+,"))?;
+        let separator = PredefinedMenuItem::separator(app)?;
+        // After About and the separator below it.
+        app_menu.insert_items(&[&settings, &separator], 2)?;
+    }
+    app.set_menu(menu)?;
+    app.on_menu_event(|app, event| {
+        if event.id() == SETTINGS_MENU_ID {
+            open_settings_window(app);
+        }
+    });
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         // Must be registered first, per the plugin's own documentation. Two
         // watchers on one folder is harmless; two windows is just confusing.
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
+            if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
                 let _ = window.set_focus();
             }
         }))
@@ -1090,6 +1376,9 @@ pub fn run() {
                         | StateFlags::MAXIMIZED
                         | StateFlags::FULLSCREEN,
                 )
+                // A small fixed-size window that is opened now and then. It opens
+                // centred every time rather than wherever it was last dragged.
+                .with_denylist(&[SETTINGS_WINDOW])
                 .build(),
         )
         .plugin(tauri_plugin_dialog::init())
@@ -1131,11 +1420,26 @@ pub fn run() {
             ask,
             pick_watch_dir,
             pick_overlay_file,
+            default_settings,
+            save_settings,
+            check_overlay_shapes,
+            list_printers,
+            list_papers,
+            open_settings,
+            export_cli_config,
+            reveal_settings_file,
         ])
+        .on_page_load(show_once_loaded)
         // Files dropped on the window. Tauri owns drag-and-drop (dragDropEnabled is
         // on, the default), so the webview never sees the drop and cannot navigate
         // to the file - which is what it did while the flag was off.
+        //
+        // Only the main window. A photo dropped on the settings window by accident
+        // would otherwise be printed from a window that shows no photos at all.
         .on_window_event(|window, event| {
+            if window.label() != MAIN_WINDOW {
+                return;
+            }
             if let WindowEvent::DragDrop(DragDropEvent::Drop { paths, .. }) = event {
                 // The whole drop at once, so a drop carrying several files it
                 // cannot use explains itself once rather than once per file.
@@ -1144,6 +1448,7 @@ pub fn run() {
         })
         .setup(|app| {
             let handle = app.handle().clone();
+            install_menu(&handle)?;
             let state = app.state::<AppState>();
 
             // A settings file that could not be read has already been moved aside

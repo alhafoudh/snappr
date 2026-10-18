@@ -309,6 +309,11 @@ Plain serde into `app_config_dir()/settings.json` rather than
 human-readable JSON with no IPC round-trip and **no capability to grant**. The
 capability file stays correspondingly tiny.
 
+**Two kinds of writer, and they never write each other's fields.** The main
+window's controls each save one field on the click; the settings window saves
+the rest through `save_settings`, which takes only what it edits. See "The
+settings window" above.
+
 **`load` never refuses to start.** A kiosk that will not open because of a stray
 character is worse than one that comes up on defaults. The `.broken` rename and
 why its ordering matters are in `CLAUDE.md` under "Everything stays where it is".
@@ -368,6 +373,12 @@ resolves to the *first*, because it is the driver's default, and the print comes
 back with a white border. The size is only a fallback for a printer that has no
 paper of that name at all, and the driver is probed by setting the paper and
 reading it back.
+
+**Which printer and which paper are settings**, picked in the settings window
+from what the printer itself reports (see "Printers and papers" above), and the
+"did the driver accept it" check compares against the print size in settings
+rather than a fixed 100 x 148 mm. A saved printer that is not connected falls back
+to the default with a `printer_missing` notice.
 
 The print panel is forced to show Paper Size and Orientation, which the default
 panel hides - that is exactly what the operator needs to see to confirm the
@@ -472,7 +483,9 @@ From `tauri.conf.json`, the settings that are decisions rather than taste:
   `core:window:allow-start-dragging` capability: the frontend draws its own
   titlebar, which is what makes the drag region matter.
 - `zoomHotkeysEnabled: false` - kiosk hardening; Cmd+/Cmd- would resize the UI.
-- `backgroundColor: "#111111"` - no white flash before the webview paints.
+- `backgroundColor: "#111111"` and `"visible": false` - together with
+  `show_once_loaded`, no white flash before the webview paints (see below for why
+  the colour alone is not enough).
 - A locked-down CSP, with `style-src 'unsafe-inline'` as the one concession to
   Radix Themes.
 
@@ -496,6 +509,104 @@ The **selection** is restored too, but it lives in the index rather than in
 settings, because it is only meaningful against those records and is dropped with
 them. A selection that did not survive the intactness filter is no selection, and
 the fallback to the newest photo is frontend policy.
+
+**There are two windows.** `main` is the one above, declared in
+`tauri.conf.json`. `settings` is built by `open_settings_window` in `lib.rs` when
+the operator picks Snappr > Settings... (Cmd+,) - built on demand rather than
+declared, because a declared window opens at launch. It loads the same
+`index.html`, and `main.tsx` renders `SettingsWindow` instead of `App` from the
+window's label. What it repeats from the main window's config, and why, is at the
+builder: dark theme, `#111111`, zoom hotkeys off. What it does not repeat: it has
+the system titlebar, because nothing is drawn over it.
+
+**Both windows are created hidden and shown by `show_once_loaded`** in `lib.rs`,
+on the page-load `Finished` event - `"visible": false` in the config for `main`,
+`.visible(false)` at the builder for `settings`. `backgroundColor` alone does not
+stop a white flash: on macOS it colours the window but not the WKWebView, whose
+white background wry only turns off when built with its `transparent` feature.
+`index.html` gives the body the same `#111111`, so from the moment the page has
+loaded the window is dark. It is Rust that shows them rather than the page, so a
+frontend that fails to load still leaves a window on screen - and not
+`requestAnimationFrame`, which WebKit does not run for a view that is not visible.
+
+Three things treat the two windows differently on purpose:
+
+- **Drops are main-only.** `on_window_event` returns early for any other label,
+  because a photo dropped on the settings window by accident would otherwise be
+  printed from a window that shows no photos.
+- **The window-state plugin denies `settings`**, so it opens centred every time
+  rather than wherever it was last dragged.
+- **`capabilities/default.json` lists both**, and grants `core:window:allow-close`
+  for the settings window to close itself on Save, Cancel and Escape.
+
+## The settings window
+
+Every setting that is not an overlay: the watch folder and the kinds of photo,
+the printer, the paper and the print size, the background, and an Advanced tab for
+the print file name ending, compression, previews and the settle timing. Overlays
+stay in the panel; two places to switch one on is how the two end up disagreeing.
+
+**A draft with Save and Cancel**, unlike every control in the main window, which
+saves on the click. Typing "1" on the way to "148" mm must not save a 1 mm paper,
+and a save can make the whole strip again. Closing the window - Escape and Cmd+W
+included - is Cancel, with no prompt; see "Modals" below.
+
+**`save_settings` takes only what the window edits.** The overlay slots, the
+library, the watch toggle and the panel's collapsed state are left exactly as the
+main window has them, because the window holds a copy loaded when it opened and a
+stale copy must not put back an overlay that was switched off in the meantime.
+`Settings::take_editable` is the list, and `saving_the_settings_window_leaves_the
+_panel_alone` in `settings.rs` is the guard.
+
+**Validation is `PipelineConfig::validate`**, the same function the CLI runs on its
+TOML, so a value the pipeline would refuse on some later photo is refused at Save,
+under the field that caused it. The window maps the catalogue code to the field
+(`FIELD_FOR` in `SettingsWindow.tsx`). The only check made in the webview is that
+a number field holds a number, and that one is not a message: the field goes back
+to its last good value when it loses focus.
+
+**What a save does depends on what changed**, decided in `save_settings`:
+
+| changed | then |
+|---|---|
+| watch folder, kinds of photo, file name ending, settle timing | the watcher is restarted - `watcher::spawn` froze its own copy |
+| paper size | the overlay cards are redrawn - their key includes the paper (`overlays::key_for`) |
+| paper size, background, preview settings | **every print on the strip is made again** (`remake_all`) |
+| compression, printer, paper name | nothing more - they are read when they are used |
+
+Remaking is automatic because a strip of prints that no longer match the settings
+is worse than the time it takes. It walks the strip on one thread, since the worker
+composites one photo at a time anyway. A photo already mid-composite finishes with
+the old settings and is then made again.
+
+**Changing the file name ending renames nothing.** Each record in `index.json`
+holds its print's real path, so prints made under the old ending still print,
+share and reveal. They stay in the drop folder under their old names, because
+snappr never renames or deletes anything there.
+
+### Printers and papers
+
+The printer and paper lists come from PrintCore (`mac::printers`, `mac::papers`),
+called through a short `extern "C"` block because objc2 has no binding for it and
+`NSPrinter` can size a paper by name but cannot list them. The commands are
+`async`, since a network printer that is asleep can take a moment to answer.
+
+- **The stored paper is the driver's keyword**, shown by its localised label -
+  `Postcard.Fullbleed` stored, "Postcard Borderless" shown.
+- **Borderless is read from the margins, never from the name.** Only Canon's
+  drivers spell it `.Fullbleed`.
+- **Choosing a paper sets the print size**, so the crop and the paper cannot
+  disagree. "Custom size" unlocks the two fields for a paper the driver does not
+  list.
+- A saved printer or paper that is not there right now stays selected and is shown
+  as not connected, rather than being silently replaced.
+- **Test print** prints the selected photo with the *unsaved* printer and paper,
+  by passing them to `print_photo`. Every other caller passes nothing and gets the
+  saved ones.
+
+Two smaller things live on the Advanced tab: **Export for the command line**
+writes `config::to_toml` of the current settings, one-way and at the CLI's own
+location by default, and **Show settings file** reveals `settings.json`.
 
 ---
 
@@ -861,6 +972,13 @@ The first is `explain_refusals` in `lib.rs`. There is no cell, no spinner, no
 photo and no line either - the info line belongs to the selected photo and the
 drop never made one. It *tells* rather than asks, and it is the one modal that is
 not a question.
+
+**The settings window is not a modal**, which is why it is a window. It blocks
+nothing - the filmstrip keeps taking arrivals behind it - and it is the third
+kind of thing this table would otherwise have needed. For the same reason closing
+it with unsaved changes does not ask: it destroys nothing the operator cannot see
+still sitting in the fields, so it is not a destructive gesture in the sense
+above.
 
 The second is the three destructive gestures, and **all three go through one
 question**: `ask` in `lib.rs` raises it, and `src/confirm.ts` is the only file

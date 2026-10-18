@@ -105,6 +105,9 @@ export function usePhotos() {
       );
       keep(await on.runtime(setRuntime));
       keep(await on.overlays(setOverlays));
+      // Saved from the settings window, which is a different webview - so the
+      // panel's background would otherwise stay the old colour until a relaunch.
+      keep(await on.settings(setSettings));
 
       // Then pull. The pipeline is ready within a millisecond of launch, which is
       // long before this component has mounted, and Tauri does not replay events -

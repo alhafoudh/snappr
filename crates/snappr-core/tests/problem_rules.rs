@@ -48,6 +48,15 @@ fn every_problem() -> Vec<Problem> {
         Problem::NotAFolder { path: photo.clone() },
         Problem::CannotWatch { path: photo.clone(), detail: "EPERM".into() },
         Problem::BackgroundNotAColour { value: "not-a-colour".into() },
+        Problem::PaperSizeInvalid { short_mm: 148.0, long_mm: 100.0 },
+        Problem::CompressionOutOfRange { value: 12 },
+        Problem::PreviewSizeInvalid { max_px: 300, thumb_px: 400 },
+        Problem::PreviewQualityOutOfRange { value: 0 },
+        Problem::StabilityInvalid { checks: 0, timeout_secs: 30 },
+        Problem::NoExtensions,
+        Problem::PngWatched,
+        Problem::OutputSuffixInvalid { value: ".print.jpg".into(), reason: "it has to end in .png" },
+        Problem::CannotExportConfig { path: path.clone(), detail: "EACCES".into() },
         Problem::ConfigUnreadable { path: path.clone(), detail: "expected a value".into() },
         Problem::SettingsUnreadable { path: path.clone(), detail: "expected a value".into() },
         Problem::CannotSaveSettings { detail: "ENOSPC".into() },
@@ -61,6 +70,7 @@ fn every_problem() -> Vec<Problem> {
         Problem::PrintFileGone,
         Problem::PrintUnreadable { path: photo.clone() },
         Problem::PaperFallback,
+        Problem::PrinterMissing { name: "Canon SELPHY CP1500".into() },
         Problem::FinderWontOpen { detail: "open -R exited 1".into() },
         Problem::WindowNotReady { what: "share sheet", detail: "no NSView".into() },
         Problem::DropAlreadyAPrint { file: "IMG_1234.overlay.png".into() },
@@ -92,7 +102,7 @@ fn the_table_is_covered() {
     );
     assert_eq!(
         problems.len(),
-        40,
+        50,
         "a variant was added to the catalogue but not to every_problem()"
     );
 }

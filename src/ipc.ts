@@ -21,8 +21,11 @@ import type { Notice } from "./bindings/Notice";
 import type { Orientation } from "./bindings/Orientation";
 import type { Overlay } from "./bindings/Overlay";
 import type { OverlayCard } from "./bindings/OverlayCard";
+import type { Paper } from "./bindings/Paper";
 import type { Payload } from "./bindings/Payload";
 import type { Photo } from "./bindings/Photo";
+import type { PrintSetup } from "./bindings/PrintSetup";
+import type { Printer } from "./bindings/Printer";
 import type { RuntimeStatus } from "./bindings/RuntimeStatus";
 import type { Settings } from "./bindings/Settings";
 
@@ -107,13 +110,36 @@ export const cmd = {
   clearAllPhotos: () => invoke<number>("clear_all_photos"),
 
   runtimeStatus: () => invoke<RuntimeStatus>("runtime_status"),
-  printPhoto: (source: string) => invoke<void>("print_photo", { source }),
+  /**
+   * `setup` is the settings window's Test Print - an unsaved printer and paper.
+   * Null means the saved ones, which is every other caller.
+   */
+  printPhoto: (source: string, setup: PrintSetup | null = null) =>
+    invoke<void>("print_photo", { source, setup }),
   /** The operator's override for the print mark `printPhoto` sets by itself. */
   setPhotoPrinted: (source: string, printed: boolean) =>
     invoke<void>("set_photo_printed", { source, printed }),
   sharePhoto: (source: string, anchor: Anchor) =>
     invoke<void>("share_photo", { source, anchor }),
   revealPhoto: (source: string) => invoke<void>("reveal_photo", { source }),
+
+  // --- The settings window.
+  openSettings: () => invoke<void>("open_settings"),
+  defaultSettings: () => invoke<Settings>("default_settings"),
+  /**
+   * Saves the window's form. Only the fields that window edits are taken; the
+   * overlay slots and the watch toggle are left as the main window has them.
+   */
+  saveSettings: (form: Settings) => invoke<Settings>("save_settings", { form }),
+  /** The sentences an in-use overlay would carry on a paper of this size. */
+  checkOverlayShapes: (shortMm: number, longMm: number) =>
+    invoke<string[]>("check_overlay_shapes", { shortMm, longMm }),
+  listPrinters: () => invoke<Printer[]>("list_printers"),
+  /** `""` is the system default printer. */
+  listPapers: (printer: string) => invoke<Paper[]>("list_papers", { printer }),
+  /** Resolves to where it was written, or null when the save panel was dismissed. */
+  exportCliConfig: () => invoke<string | null>("export_cli_config"),
+  revealSettingsFile: () => invoke<void>("reveal_settings_file"),
 };
 
 /**
@@ -133,4 +159,11 @@ export const on = {
     listen<OverlayCard[]>("overlays", (event) => handle(event.payload)),
   notice: (handle: (notice: Notice) => void) =>
     listen<Notice>("notice", (event) => handle(event.payload)),
+  /**
+   * The settings as the settings window saved them. Every other setter returns
+   * the new settings to its own caller; this one is saved from a different
+   * window than the one that has to redraw.
+   */
+  settings: (handle: (settings: Settings) => void) =>
+    listen<Settings>("settings", (event) => handle(event.payload)),
 };
